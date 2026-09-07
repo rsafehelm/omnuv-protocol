@@ -146,6 +146,10 @@ pub struct GatewaySpec {
     /// The project slice this gateway routes. The agent must advertise this and
     /// nothing wider — never a supernet, never a default route.
     pub advertise_cidr: Option<String>,
+    /// The gateway's own address on the provider's marketplace bridge, e.g.
+    /// `10.200.4.1/24`. It is the next hop for every buyer machine here.
+    #[serde(default)]
+    pub slice_address: Option<String>,
     /// Public SSH keys for operator access to the gateway itself.
     #[serde(default)]
     pub ssh_keys: Vec<String>,
@@ -195,6 +199,32 @@ pub struct InstanceSpec {
     /// the same reboot is never applied twice.
     #[serde(default)]
     pub reboot_token: Option<String>,
+    /// The marketplace address this machine holds, and the network it belongs
+    /// to. Set when the buyer's project has a private network: the machine then
+    /// gets a second interface on the provider's isolated marketplace bridge
+    /// instead of only a provider-local address.
+    #[serde(default)]
+    pub network: Option<NetworkAttachment>,
+}
+
+/// A machine's place on a buyer's private network.
+///
+/// The address is the marketplace's, not the provider's — provider networks do
+/// not invent buyer-visible addresses. The bridge it lands on has no uplink, so
+/// the machine has no path to the provider's own network at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkAttachment {
+    /// e.g. `10.200.4.12`
+    pub address: String,
+    /// The whole project network, e.g. `10.200.4.0/24`. Reached through the
+    /// gateway; the machine is configured with a /32 so that addresses on other
+    /// providers are routed rather than assumed to be on this segment.
+    pub cidr: String,
+    /// The provider's gateway on this network, e.g. `10.200.4.1`.
+    pub gateway: String,
+    /// The name the marketplace publishes for this machine.
+    #[serde(default)]
+    pub dns_name: Option<String>,
 }
 
 /// Normalized instance state reported upward.
