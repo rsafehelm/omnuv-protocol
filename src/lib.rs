@@ -118,6 +118,60 @@ pub struct DesiredState {
     pub inference_workers: Vec<InferenceWorkerSpec>,
     #[serde(default)]
     pub instances: Vec<InstanceSpec>,
+    /// The overlay gateway this provider should be running, if any. `None`
+    /// means no buyer here needs one, and an existing gateway is torn down.
+    #[serde(default)]
+    pub gateway: Option<GatewaySpec>,
+}
+
+/// The provider's overlay gateway.
+///
+/// A small VM that is the only peer on this provider. It exists so that the
+/// overlay client never runs on the hypervisor: a WireGuard interface writing
+/// routes there could cover the management address and take the host — and
+/// every guest on it — off the network.
+///
+/// It carries buyer traffic only. Nothing in the Omnu control plane depends on
+/// it, so a broken gateway must never make a healthy provider look offline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewaySpec {
+    pub id: String,
+    pub lifecycle: Lifecycle,
+    /// Where the overlay control plane lives. The agent does not reach Core
+    /// through this; it is handed to the gateway's overlay client.
+    pub management_url: String,
+    /// Enrols the gateway into exactly one buyer's network. Issued by Core,
+    /// never minted by the provider.
+    pub setup_key: String,
+    /// The project slice this gateway routes. The agent must advertise this and
+    /// nothing wider — never a supernet, never a default route.
+    pub advertise_cidr: Option<String>,
+    /// Public SSH keys for operator access to the gateway itself.
+    #[serde(default)]
+    pub ssh_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum GatewayState {
+    Pending,
+    Deploying,
+    Ready,
+    Error,
+    Offline,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayStatus {
+    pub id: String,
+    pub state: GatewayState,
+    #[serde(default)]
+    pub local_id: Option<String>,
+    /// The address the gateway holds on the overlay, once it has one.
+    #[serde(default)]
+    pub overlay_address: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 /// A buyer's virtual machine, normalized. The driver translates this into
@@ -231,6 +285,8 @@ pub struct StatusReport {
     pub workers: Vec<WorkerStatus>,
     #[serde(default)]
     pub instances: Vec<InstanceStatus>,
+    #[serde(default)]
+    pub gateway: Option<GatewayStatus>,
 }
 
 /// Frames on the reverse tunnel.
