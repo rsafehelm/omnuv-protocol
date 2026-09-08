@@ -92,6 +92,10 @@ pub struct InventoryReport {
     pub location: Option<GeoLocation>,
     #[serde(default)]
     pub city: Option<String>,
+    /// Marketplace image ids this provider can build. The template behind
+    /// each one is the agent's own configuration and is never reported.
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 impl InventoryReport {
@@ -153,6 +157,22 @@ pub struct GatewaySpec {
     /// Public SSH keys for operator access to the gateway itself.
     #[serde(default)]
     pub ssh_keys: Vec<String>,
+    /// The whole project's name → address map, served as `.internal` by the
+    /// gateway's resolver. Every provider's gateway carries every name, which
+    /// is what keeps placement invisible: a buyer machine asks its own
+    /// gateway and gets an answer for a machine anywhere in the project.
+    #[serde(default)]
+    pub dns_records: Vec<DnsRecord>,
+}
+
+/// One private DNS record. Naming is the marketplace's; a provider never
+/// invents a buyer-visible name or address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsRecord {
+    /// e.g. `gpu-2.internal`
+    pub name: String,
+    /// e.g. `10.200.99.11`
+    pub address: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,13 +205,21 @@ pub struct InstanceSpec {
     pub id: String,
     pub lifecycle: Lifecycle,
     pub name: String,
-    pub image: String,
+    /// What to build from, and everything about it that changes with the
+    /// operating system. The agent maps the id to its own template.
+    #[serde(default)]
+    pub image: ImageSpec,
     pub vcpus: u32,
     pub memory_mib: u64,
     pub disk_gib: u64,
     /// Public SSH keys to inject at first boot. Never a private key.
     #[serde(default)]
     pub ssh_keys: Vec<String>,
+    /// crypt(3) hash of the machine's console password, set at first boot for
+    /// the image's default user. The plaintext exists only in the create
+    /// response the buyer saw once. `None` on images that manage their own.
+    #[serde(default)]
+    pub console_password_hash: Option<String>,
     #[serde(default)]
     pub gpu_local_ids: Vec<String>,
     /// Set when a reboot has been requested and not yet performed. Carries the
@@ -205,6 +233,62 @@ pub struct InstanceSpec {
     /// instead of only a provider-local address.
     #[serde(default)]
     pub network: Option<NetworkAttachment>,
+}
+
+/// What the agent needs to know about an image to build a machine from it.
+///
+/// The operating system decides the first-boot mechanism, the user that gets
+/// the buyer's credentials and how the buyer will log in; nothing else in the
+/// contract changes between a Linux and a Windows image. The provider-local
+/// template behind the id is the agent's own configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageSpec {
+    /// The marketplace image id, e.g. `ubuntu-26.04`.
+    pub id: String,
+    pub os_family: OsFamily,
+    pub first_boot: FirstBoot,
+    /// The account first boot creates for the buyer, e.g. `omnu` or `Administrator`.
+    pub default_user: String,
+    pub auth_mode: AuthMode,
+}
+
+impl Default for ImageSpec {
+    /// The image the marketplace shipped with, for messages from a Core that
+    /// predates the catalog.
+    fn default() -> Self {
+        Self {
+            id: "ubuntu-26.04".into(),
+            os_family: OsFamily::Linux,
+            first_boot: FirstBoot::CloudInit,
+            default_user: "omnu".into(),
+            auth_mode: AuthMode::SshKey,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OsFamily {
+    Linux,
+    Windows,
+}
+
+/// The first-boot mechanism an image expects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FirstBoot {
+    CloudInit,
+    /// The Windows port of cloud-init.
+    CloudbaseInit,
+}
+
+/// How the buyer authenticates to the machine. The console password exists
+/// regardless; this is about the network login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthMode {
+    SshKey,
+    Password,
 }
 
 /// A machine's place on a buyer's private network.
@@ -225,6 +309,11 @@ pub struct NetworkAttachment {
     /// The name the marketplace publishes for this machine.
     #[serde(default)]
     pub dns_name: Option<String>,
+    /// The interface's hardware address. The driver assigns it and the guest
+    /// matches on it: an interface cannot be found by name, because the distro
+    /// chooses that and it differs by image and by slot.
+    #[serde(default)]
+    pub mac: String,
 }
 
 /// Normalized instance state reported upward.
