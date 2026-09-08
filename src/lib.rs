@@ -233,6 +233,27 @@ pub struct InstanceSpec {
     /// instead of only a provider-local address.
     #[serde(default)]
     pub network: Option<NetworkAttachment>,
+    /// Software to bring up at first boot, when the machine is a recipe
+    /// deployment. The agent compiles it to what its runtime executes.
+    #[serde(default)]
+    pub recipe: Option<RecipeSpec>,
+}
+
+/// A recipe as the machine runtime executes it: a compose file brought up
+/// at first boot, then the recipe's own finishing commands. Execution detail
+/// only — which recipe this is, what it costs and why it was placed here are
+/// the marketplace's business and stay there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RecipeSpec {
+    pub id: String,
+    pub compose: String,
+    /// Whether the containers reserve a GPU, so the runtime installs the
+    /// container toolkit for it.
+    #[serde(default)]
+    pub gpu: bool,
+    /// Shell, run in the compose directory once the containers are up.
+    #[serde(default)]
+    pub post_up: Vec<String>,
 }
 
 /// What the agent needs to know about an image to build a machine from it.
