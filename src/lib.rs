@@ -439,6 +439,18 @@ pub enum TunnelFrame {
     End { id: String },
     /// provider -> Core: this request failed locally.
     Error { id: String, message: String },
+    /// Core -> provider: open a console on one of this provider's machines.
+    ///
+    /// Out-of-band access: the hypervisor's own console, so it works when the
+    /// machine's network does not, and nothing runs in the guest for it. The
+    /// agent answers with `Head` (open) or `Error`, then `ConsoleData` frames
+    /// flow both ways until `Cancel` (Core) or `End` (provider).
+    ConsoleOpen { id: String, instance_id: String, kind: ConsoleKind },
+    /// Either direction: raw console bytes, base64 — a terminal stream is not
+    /// UTF-8 at frame boundaries, and the tunnel is text.
+    ConsoleData { id: String, data: String },
+    /// Core -> provider: the buyer's terminal changed size.
+    ConsoleResize { id: String, cols: u16, rows: u16 },
     /// Core -> provider: desired state changed, reconcile now.
     ///
     /// A nudge, not the payload: the agent then fetches desired state over the
@@ -448,6 +460,25 @@ pub enum TunnelFrame {
     /// Either direction: liveness, so a silently dead TCP connection is noticed.
     Ping,
     Pong,
+}
+
+/// Which console a machine offers. Decided by its image (`ImageSpec`), never
+/// by the buyer: a serial terminal for machines that log in on a tty, VNC for
+/// ones that need a screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleKind {
+    Serial,
+    Vnc,
+}
+
+impl ConsoleKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConsoleKind::Serial => "serial",
+            ConsoleKind::Vnc => "vnc",
+        }
+    }
 }
 
 #[cfg(test)]
