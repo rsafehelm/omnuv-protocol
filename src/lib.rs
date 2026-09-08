@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any breaking change to the message shapes below.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Wire names are pinned explicitly rather than derived. `rename_all` would
 /// render `K3sKubeVirt` as "k3s-kube-virt", which is not the identifier used
@@ -122,25 +122,36 @@ pub struct DesiredState {
     pub inference_workers: Vec<InferenceWorkerSpec>,
     #[serde(default)]
     pub instances: Vec<InstanceSpec>,
-    /// The overlay gateway this provider should be running, if any. `None`
-    /// means no buyer here needs one, and an existing gateway is torn down.
+    /// The overlay gateways this provider should be running: one per buyer
+    /// network that has a machine here. A gateway whose network has no machine
+    /// left on this provider is listed with `Lifecycle::Deleted` until the
+    /// agent reports it gone.
     #[serde(default)]
-    pub gateway: Option<GatewaySpec>,
+    pub gateways: Vec<GatewaySpec>,
 }
 
-/// The provider's overlay gateway.
+/// A provider's overlay gateway for one buyer network.
 ///
-/// A small VM that is the only peer on this provider. It exists so that the
-/// overlay client never runs on the hypervisor: a WireGuard interface writing
-/// routes there could cover the management address and take the host — and
-/// every guest on it — off the network.
+/// A small VM, one per buyer network on the provider, and the only kind of
+/// overlay peer there. It exists so that the overlay client never runs on the
+/// hypervisor: a WireGuard interface writing routes there could cover the
+/// management address and take the host — and every guest on it — off the
+/// network.
 ///
-/// It carries buyer traffic only. Nothing in the Omnu control plane depends on
-/// it, so a broken gateway must never make a healthy provider look offline.
+/// It carries one buyer's traffic only. It sits on a segment of its own with
+/// that buyer's machines, holds that buyer's key, and answers that buyer's
+/// names; two tenants on one provider never share a segment or a gateway.
+/// Nothing in the Omnu control plane depends on it, so a broken gateway must
+/// never make a healthy provider look offline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewaySpec {
     pub id: String,
     pub lifecycle: Lifecycle,
+    /// The buyer network this gateway serves. The driver derives the network's
+    /// segment on this provider from it, and puts the gateway and the
+    /// network's machines there.
+    #[serde(default)]
+    pub network_id: String,
     /// Where the overlay control plane lives. The agent does not reach Core
     /// through this; it is handed to the gateway's overlay client.
     pub management_url: String,
@@ -319,6 +330,10 @@ pub enum AuthMode {
 /// the machine has no path to the provider's own network at all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkAttachment {
+    /// The network itself. The driver derives the network's segment on this
+    /// provider from it — the same one the network's gateway sits on.
+    #[serde(default)]
+    pub network_id: String,
     /// e.g. `10.200.4.12`
     pub address: String,
     /// The whole project network, e.g. `10.200.4.0/24`. Reached through the
@@ -426,7 +441,7 @@ pub struct StatusReport {
     #[serde(default)]
     pub instances: Vec<InstanceStatus>,
     #[serde(default)]
-    pub gateway: Option<GatewayStatus>,
+    pub gateways: Vec<GatewayStatus>,
 }
 
 /// Frames on the reverse tunnel.
