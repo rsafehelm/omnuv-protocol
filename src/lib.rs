@@ -472,6 +472,10 @@ pub enum TunnelFrame {
     ConsoleData { id: String, data: String },
     /// Core -> provider: the buyer's terminal changed size.
     ConsoleResize { id: String, cols: u16, rows: u16 },
+    /// provider -> Core, after `Head`: a one-time secret the viewer needs to
+    /// authenticate inside the console protocol (VNC's password). Minted by
+    /// the hypervisor for this session only; never stored.
+    ConsoleCredential { id: String, password: String },
     /// Core -> provider: desired state changed, reconcile now.
     ///
     /// A nudge, not the payload: the agent then fetches desired state over the
