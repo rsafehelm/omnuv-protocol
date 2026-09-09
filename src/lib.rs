@@ -514,9 +514,37 @@ pub struct WorkerStatus {
     pub message: Option<String>,
 }
 
+/// One line of the agent's own audit log, travelling up to the marketplace.
+///
+/// The provider's copy on their disk stays authoritative for them: this is a
+/// *subset* sent so Core can show a provider what was asked of their hardware
+/// in the same words, and so a buyer's timeline can say what actually happened
+/// rather than only what state a thing reached. It carries no secret and no
+/// buyer payload, by the same redaction policy the local log follows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditEntry {
+    /// RFC 3339, from the provider's clock.
+    pub at: String,
+    /// What was done: "instance.start", "gateway.delete".
+    pub action: String,
+    /// Who asked. "core" for anything arriving as desired state, "agent" for
+    /// work the agent decided to do itself.
+    pub actor: String,
+    /// What it acted on, in marketplace terms.
+    pub subject: String,
+    pub outcome: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusReport {
     pub protocol_version: u32,
+    /// A slice of the agent's own audit log since the last report. Bounded by
+    /// the agent and again by Core: a provider is semi-trusted, and an
+    /// unbounded list from one is a way to fill somebody else's database.
+    #[serde(default)]
+    pub audit: Vec<AuditEntry>,
     #[serde(default)]
     pub workers: Vec<WorkerStatus>,
     #[serde(default)]
