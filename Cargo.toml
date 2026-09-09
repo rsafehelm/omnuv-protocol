@@ -1,9 +1,9 @@
 [package]
-name = "omnu-protocol"
+name = "omnuv-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Public wire contract between Omnu Core and Omnu Provider agents."
+description = "Public wire contract between Omnuv Core and Omnuv Provider agents."
 
 [dependencies]
 serde = { workspace = true }

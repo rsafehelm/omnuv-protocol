@@ -1,4 +1,4 @@
-//! Public, versioned contract between Omnu Core and Omnu Provider agents.
+//! Public, versioned contract between Omnuv Core and Omnuv Provider agents.
 //!
 //! This crate is PUBLIC. It must never depend on anything under `private/`,
 //! and must never carry marketplace decision logic: no pricing, no provider
@@ -141,7 +141,7 @@ pub struct DesiredState {
 /// It carries one buyer's traffic only. It sits on a segment of its own with
 /// that buyer's machines, holds that buyer's key, and answers that buyer's
 /// names; two tenants on one provider never share a segment or a gateway.
-/// Nothing in the Omnu control plane depends on it, so a broken gateway must
+/// Nothing in the Omnuv control plane depends on it, so a broken gateway must
 /// never make a healthy provider look offline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewaySpec {
@@ -279,7 +279,7 @@ pub struct ImageSpec {
     pub id: String,
     pub os_family: OsFamily,
     pub first_boot: FirstBoot,
-    /// The account first boot creates for the buyer, e.g. `omnu` or `Administrator`.
+    /// The account first boot creates for the buyer, e.g. `omnuv` or `Administrator`.
     pub default_user: String,
     pub auth_mode: AuthMode,
 }
@@ -292,7 +292,7 @@ impl Default for ImageSpec {
             id: "ubuntu-26.04".into(),
             os_family: OsFamily::Linux,
             first_boot: FirstBoot::CloudInit,
-            default_user: "omnu".into(),
+            default_user: "omnuv".into(),
             auth_mode: AuthMode::SshKey,
         }
     }
