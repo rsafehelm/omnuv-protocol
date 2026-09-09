@@ -532,6 +532,9 @@ mod tests {
             capabilities: ComputeCapabilities { vm: true, gpu_passthrough: true, ..Default::default() },
             location: None,
             city: None,
+            // What this provider can build from. Absent means it offers the
+            // marketplace's default only.
+            images: vec!["ubuntu-26.04".into()],
             nodes: vec![NodeInventory {
                 local_id: "pve".into(),
                 cpu_cores: 16,
