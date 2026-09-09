@@ -118,6 +118,21 @@ impl InventoryReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesiredState {
     pub protocol_version: u32,
+    /// A fingerprint of everything below. An agent that already holds this
+    /// version can say so when it asks, and Core answers with `unchanged`
+    /// instead of the whole picture — Core's cost should grow with what is
+    /// happening, not with how many machines exist.
+    ///
+    /// It does **not** mean the agent may skip a tick. Reconciliation still
+    /// runs every time, because drift on the hypervisor is exactly what the
+    /// loop exists to correct; what is saved is the transfer, not the work.
+    #[serde(default)]
+    pub version: u64,
+    /// Set when the agent asked with `?known=<version>` and nothing has
+    /// changed. The collections below are then empty and mean nothing: the
+    /// agent reconciles against the copy it already holds.
+    #[serde(default)]
+    pub unchanged: bool,
     #[serde(default)]
     pub inference_workers: Vec<InferenceWorkerSpec>,
     #[serde(default)]
@@ -145,6 +160,17 @@ pub struct DesiredState {
 /// never make a healthy provider look offline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewaySpec {
+    /// How long Core is still prepared to wait for this gateway, in seconds.
+    ///
+    /// The agent owns the fine clock — this clone is taking too long, retry,
+    /// give up — and Core keeps a slower durable backstop in the database. Two
+    /// clocks on purpose: the inner one is cheap and dies with the process,
+    /// which is fine, and the outer one exists precisely because it can.
+    ///
+    /// `None` means Core did not say, and the agent should use its own
+    /// default rather than waiting forever.
+    #[serde(default)]
+    pub budget_secs: Option<u64>,
     pub id: String,
     pub lifecycle: Lifecycle,
     /// The buyer network this gateway serves. The driver derives the network's
@@ -198,6 +224,17 @@ pub enum GatewayState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayStatus {
+    /// Whether trying again could plausibly work. `Some(false)` says stop: the
+    /// image is not offered here, the spec is impossible, the card is gone.
+    /// Without this Core must poll to learn anything, which is the chatter the
+    /// version above exists to remove.
+    #[serde(default)]
+    pub retryable: Option<bool>,
+    /// What this is waiting for, in the agent's own words: "the template to
+    /// finish cloning", "a free card". "Waiting" without "for what" is not
+    /// information.
+    #[serde(default)]
+    pub waiting_on: Option<String>,
     pub id: String,
     pub state: GatewayState,
     #[serde(default)]
@@ -213,6 +250,17 @@ pub struct GatewayStatus {
 /// runtime-native resources; nothing here names Proxmox, KubeVirt or OpenStack.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceSpec {
+    /// How long Core is still prepared to wait for this machine, in seconds.
+    ///
+    /// The agent owns the fine clock — this clone is taking too long, retry,
+    /// give up — and Core keeps a slower durable backstop in the database. Two
+    /// clocks on purpose: the inner one is cheap and dies with the process,
+    /// which is fine, and the outer one exists precisely because it can.
+    ///
+    /// `None` means Core did not say, and the agent should use its own
+    /// default rather than waiting forever.
+    #[serde(default)]
+    pub budget_secs: Option<u64>,
     pub id: String,
     pub lifecycle: Lifecycle,
     pub name: String,
@@ -366,6 +414,17 @@ pub enum InstanceState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceStatus {
+    /// Whether trying again could plausibly work. `Some(false)` says stop: the
+    /// image is not offered here, the spec is impossible, the card is gone.
+    /// Without this Core must poll to learn anything, which is the chatter the
+    /// version above exists to remove.
+    #[serde(default)]
+    pub retryable: Option<bool>,
+    /// What this is waiting for, in the agent's own words: "the template to
+    /// finish cloning", "a free card". "Waiting" without "for what" is not
+    /// information.
+    #[serde(default)]
+    pub waiting_on: Option<String>,
     pub id: String,
     pub state: InstanceState,
     /// Echoes the `reboot_token` the agent acted on, so Core can close it out.
@@ -392,6 +451,17 @@ pub enum Lifecycle {
 /// what to run, never why it was placed here or what it costs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferenceWorkerSpec {
+    /// How long Core is still prepared to wait for this worker, in seconds.
+    ///
+    /// The agent owns the fine clock — this clone is taking too long, retry,
+    /// give up — and Core keeps a slower durable backstop in the database. Two
+    /// clocks on purpose: the inner one is cheap and dies with the process,
+    /// which is fine, and the outer one exists precisely because it can.
+    ///
+    /// `None` means Core did not say, and the agent should use its own
+    /// default rather than waiting forever.
+    #[serde(default)]
+    pub budget_secs: Option<u64>,
     pub id: String,
     pub lifecycle: Lifecycle,
     pub image: String,
@@ -423,6 +493,17 @@ pub enum WorkerState {
 /// Normalized worker state reported upward. `local_id` is opaque to Core.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerStatus {
+    /// Whether trying again could plausibly work. `Some(false)` says stop: the
+    /// image is not offered here, the spec is impossible, the card is gone.
+    /// Without this Core must poll to learn anything, which is the chatter the
+    /// version above exists to remove.
+    #[serde(default)]
+    pub retryable: Option<bool>,
+    /// What this is waiting for, in the agent's own words: "the template to
+    /// finish cloning", "a free card". "Waiting" without "for what" is not
+    /// information.
+    #[serde(default)]
+    pub waiting_on: Option<String>,
     pub id: String,
     pub state: WorkerState,
     #[serde(default)]
