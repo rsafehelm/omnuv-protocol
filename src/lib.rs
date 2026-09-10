@@ -665,6 +665,57 @@ pub struct ServingStats {
     pub generation_tokens_total: u64,
 }
 
+/// One thing an agent checked about itself, and what it found.
+///
+/// The failure this exists for is silence. A gateway VM that exists, is
+/// `running`, and has been reconciled to the desired state can still be unable
+/// to reach the overlay — and every surface above it reports health, because
+/// every surface above it is asking whether the *object* is there. It took a
+/// buyer's endpoint answering 502 to notice, and the machine behind it had been
+/// healthy the whole time.
+///
+/// So a check names what it verified and, crucially, whether it verified
+/// **presence** or **reachability**. The two fail independently and only the
+/// second one is what a buyer experiences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelfCheck {
+    /// Stable identifier, e.g. `gateway.peer.connected`. Named so Core can
+    /// track one check over time rather than diffing prose.
+    pub name: String,
+    pub kind: CheckKind,
+    pub result: CheckResult,
+    /// What was observed, in the agent's own words. Present on a failure and
+    /// worth having on a pass: "connected, 3 peers" ages better than "ok".
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// What this check is about, when it is about one thing: a gateway id, a
+    /// network id, a bridge name.
+    #[serde(default)]
+    pub subject: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckKind {
+    /// The thing is configured and exists.
+    Presence,
+    /// The thing actually works: a packet got somewhere and something answered.
+    /// This is the one that matters, and the one nothing asked before.
+    Connectivity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckResult {
+    Pass,
+    Fail,
+    /// Could not be determined — no guest agent, still booting, not applicable
+    /// here. Never to be shown as a pass, and never as a failure either: the
+    /// difference between "broken" and "not known" is most of the value of
+    /// checking at all.
+    Unknown,
+}
+
 /// One line of the agent's own audit log, travelling up to the marketplace.
 ///
 /// The provider's copy on their disk stays authoritative for them: this is a
@@ -702,6 +753,10 @@ pub struct StatusReport {
     pub instances: Vec<InstanceStatus>,
     #[serde(default)]
     pub gateways: Vec<GatewayStatus>,
+    /// What this agent verified about itself on this pass. Additive: an older
+    /// Core ignores it, and an older agent sends none.
+    #[serde(default)]
+    pub checks: Vec<SelfCheck>,
 }
 
 /// Frames on the reverse tunnel.
@@ -948,5 +1003,77 @@ mod workload_tests {
             assert_ne!(a, b);
             assert_ne!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap());
         }
+    }
+}
+
+#[cfg(test)]
+mod selfcheck_tests {
+    use super::*;
+
+    /// Presence and connectivity are different questions, and conflating them
+    /// is what let a gateway that existed but could reach nothing report as
+    /// healthy for hours.
+    #[test]
+    fn presence_and_connectivity_are_not_the_same_check() {
+        let exists = SelfCheck {
+            name: "gateway.vm".into(),
+            kind: CheckKind::Presence,
+            result: CheckResult::Pass,
+            detail: Some("vmid 103, running".into()),
+            subject: Some("gw-cc8d3ca7".into()),
+        };
+        let reaches = SelfCheck {
+            name: "gateway.peer.connected".into(),
+            kind: CheckKind::Connectivity,
+            result: CheckResult::Fail,
+            detail: Some("Management: Disconnected".into()),
+            subject: Some("gw-cc8d3ca7".into()),
+        };
+        // The exact state we were in. Both are true at once, and only reporting
+        // the first is how it stayed invisible.
+        assert_eq!(exists.result, CheckResult::Pass);
+        assert_eq!(reaches.result, CheckResult::Fail);
+        assert_ne!(exists.kind, reaches.kind);
+    }
+
+    /// Unknown is not a pass and not a failure. A machine still booting has not
+    /// failed its checks, and reporting either extreme is a lie.
+    #[test]
+    fn unknown_is_its_own_answer() {
+        for r in [CheckResult::Pass, CheckResult::Fail] {
+            assert_ne!(r, CheckResult::Unknown);
+        }
+        let json = serde_json::to_string(&CheckResult::Unknown).unwrap();
+        assert_eq!(json, "\"unknown\"");
+    }
+
+    #[test]
+    fn a_check_survives_a_round_trip() {
+        let c = SelfCheck {
+            name: "core.reachable".into(),
+            kind: CheckKind::Connectivity,
+            result: CheckResult::Pass,
+            detail: None,
+            subject: None,
+        };
+        let back: SelfCheck = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back, c);
+    }
+
+    /// An older agent sends a status report with no `checks` at all, and a
+    /// newer Core must read it rather than reject it.
+    #[test]
+    fn a_status_report_without_checks_still_parses() {
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"checks":[]}"#).unwrap();
+        assert!(v.get("checks").unwrap().as_array().unwrap().is_empty());
+        // And the field defaults when entirely absent.
+        #[derive(serde::Deserialize)]
+        struct JustChecks {
+            #[serde(default)]
+            checks: Vec<SelfCheck>,
+        }
+        let none: JustChecks = serde_json::from_str("{}").unwrap();
+        assert!(none.checks.is_empty());
     }
 }
