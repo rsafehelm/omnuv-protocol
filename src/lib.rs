@@ -554,6 +554,115 @@ pub struct WorkerStatus {
     pub endpoint: Option<String>,
     #[serde(default)]
     pub message: Option<String>,
+    /// What the Workload Agent inside this machine last said about itself.
+    ///
+    /// Absent means nothing has reported — an older agent, a machine that has
+    /// not booted far enough, or a report gone stale. It must never be read as
+    /// "unhealthy": the Provider Agent's own probe is what decides `state`, and
+    /// this only ever *adds* detail to it. A push that never arrives costs
+    /// latency and never truth.
+    #[serde(default)]
+    pub telemetry: Option<WorkloadReport>,
+}
+
+/// What a Workload Agent observes from inside a machine the marketplace owns.
+///
+/// The reason this tier exists at all is physical: a passed-through GPU is
+/// bound to `vfio-pci` on the host, so the host has no driver to ask and
+/// `nvidia-smi` there cannot see the card. Utilisation, real VRAM, temperature
+/// and power exist only inside the guest.
+///
+/// Never collected from a buyer's machine. The buyer owns it, could forge any
+/// of this, and its silence would be indistinguishable from a dead machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadReport {
+    /// The marketplace id of the workload this describes.
+    pub workload_id: String,
+    /// Seconds since the Workload Agent started. A number that keeps resetting
+    /// is a crash loop, which is invisible in a health check that only asks
+    /// whether something answers right now.
+    pub uptime_s: u64,
+    /// Whether the thing beside it will actually serve a request.
+    pub health: WorkloadHealth,
+    /// How far along the model is. Absent once serving.
+    #[serde(default)]
+    pub model: Option<ModelProgress>,
+    #[serde(default)]
+    pub gpus: Vec<GpuTelemetry>,
+    #[serde(default)]
+    pub serving: Option<ServingStats>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkloadHealth {
+    /// Answering, and answering promptly.
+    Serving,
+    /// The process is up and the port answers, but slowly enough that routing
+    /// traffic here would hurt. An HTTP 200 alone cannot tell these apart, and
+    /// that gap is why `state` is not the whole story.
+    Degraded,
+    /// Up, not yet able to serve — weights still loading.
+    Starting,
+    /// Down.
+    Down,
+}
+
+/// Where a model is between "nothing on disk" and "ready to serve".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelProgress {
+    pub stage: ModelStage,
+    /// Bytes in the model cache. The honest measure of a download: the weights
+    /// are fetched inside a container we do not run, so the observable fact is
+    /// the cache growing on disk.
+    #[serde(default)]
+    pub cached_bytes: u64,
+    /// Bytes gained since the previous report, so a stall is visible as zero
+    /// rather than as a number that merely stopped rising.
+    #[serde(default)]
+    pub delta_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelStage {
+    Downloading,
+    Loading,
+    Loaded,
+}
+
+/// One GPU, as the guest sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpuTelemetry {
+    /// Index inside the guest. Not the provider-local id: the host and the
+    /// guest number cards differently, and conflating them attributes load to
+    /// the wrong card.
+    pub index: u32,
+    pub name: String,
+    /// The card's real VRAM, which retires the host-side static device table.
+    pub vram_total_mib: u64,
+    pub vram_used_mib: u64,
+    pub utilization_pct: u32,
+    #[serde(default)]
+    pub temperature_c: Option<u32>,
+    /// Milliwatts, not watts as a float: this type is compared for equality
+    /// all the way up the stack, and a float in a wire type makes that a
+    /// question about representation instead of about the card.
+    #[serde(default)]
+    pub power_mw: Option<u32>,
+}
+
+/// Load, for placement to reason about later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServingStats {
+    pub requests_running: u32,
+    /// Depth of the queue. The number that says "this worker is full" before
+    /// latency does.
+    pub requests_waiting: u32,
+    #[serde(default)]
+    pub prompt_tokens_total: u64,
+    #[serde(default)]
+    pub generation_tokens_total: u64,
 }
 
 /// One line of the agent's own audit log, travelling up to the marketplace.
@@ -751,6 +860,93 @@ mod tests {
         for rk in [RuntimeKind::Proxmox, RuntimeKind::K3sKubeVirt, RuntimeKind::OpenStack] {
             let json = serde_json::to_string(&rk).unwrap();
             assert_eq!(json, format!("\"{}\"", rk.as_str()), "serde name must match as_str()");
+        }
+    }
+}
+
+#[cfg(test)]
+mod workload_tests {
+    use super::*;
+
+    fn report() -> WorkloadReport {
+        WorkloadReport {
+            workload_id: "worker_1".into(),
+            uptime_s: 90,
+            health: WorkloadHealth::Serving,
+            model: None,
+            gpus: vec![GpuTelemetry {
+                index: 0,
+                name: "NVIDIA GeForce RTX 3090".into(),
+                vram_total_mib: 24576,
+                vram_used_mib: 21000,
+                utilization_pct: 87,
+                temperature_c: Some(71),
+                power_mw: Some(305_500),
+            }],
+            serving: Some(ServingStats {
+                requests_running: 2,
+                requests_waiting: 5,
+                prompt_tokens_total: 100,
+                generation_tokens_total: 40,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_report_survives_a_round_trip() {
+        let json = serde_json::to_string(&report()).unwrap();
+        assert_eq!(serde_json::from_str::<WorkloadReport>(&json).unwrap(), report());
+    }
+
+    /// The whole reason `telemetry` did not bump PROTOCOL_VERSION. An agent
+    /// built before this field existed receives it and must ignore it, not
+    /// fail: a provider running last month's agent has to keep working.
+    #[test]
+    fn an_older_peer_ignores_telemetry_it_does_not_know() {
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct WorkerStatusAsItWasBefore {
+            id: String,
+            state: WorkerState,
+        }
+
+        let with_telemetry = serde_json::to_string(&WorkerStatus {
+            retryable: None,
+            waiting_on: None,
+            id: "worker_1".into(),
+            state: WorkerState::Ready,
+            local_id: None,
+            endpoint: None,
+            message: None,
+            telemetry: Some(report()),
+        })
+        .unwrap();
+
+        let old: WorkerStatusAsItWasBefore = serde_json::from_str(&with_telemetry).unwrap();
+        assert_eq!(old.id, "worker_1");
+    }
+
+    /// And the other direction: a newer Core reading an older agent's status,
+    /// which carries no telemetry at all.
+    #[test]
+    fn a_newer_peer_accepts_a_status_with_no_telemetry() {
+        let from_an_old_agent = r#"{"id":"worker_1","state":"READY"}"#;
+        let s: WorkerStatus = serde_json::from_str(from_an_old_agent).unwrap();
+        assert!(s.telemetry.is_none());
+    }
+
+    /// Health is not a boolean. `Degraded` exists because an HTTP 200 from a
+    /// worker that takes 30 seconds to answer is indistinguishable from a
+    /// healthy one, and routing to it hurts.
+    #[test]
+    fn degraded_is_distinct_from_serving_and_from_down() {
+        for (a, b) in [
+            (WorkloadHealth::Serving, WorkloadHealth::Degraded),
+            (WorkloadHealth::Degraded, WorkloadHealth::Down),
+            (WorkloadHealth::Starting, WorkloadHealth::Down),
+        ] {
+            assert_ne!(a, b);
+            assert_ne!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap());
         }
     }
 }
