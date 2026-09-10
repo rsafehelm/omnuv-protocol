@@ -591,6 +591,11 @@ pub struct WorkloadReport {
     pub gpus: Vec<GpuTelemetry>,
     #[serde(default)]
     pub serving: Option<ServingStats>,
+    /// Connections this machine saw arriving. The responder's half of the
+    /// reachability handshake: without it, a probe that "succeeded" cannot be
+    /// distinguished from something else answering in this machine's place.
+    #[serde(default)]
+    pub observed: Vec<ObservedPeer>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -714,6 +719,77 @@ pub enum CheckResult {
     /// difference between "broken" and "not known" is most of the value of
     /// checking at all.
     Unknown,
+}
+
+/// One end's account of a path, so two ends can be compared.
+///
+/// ## Why two ends and not one
+///
+/// A single prober can only say "I connected". It cannot say *what* it
+/// connected to. A stale NAT entry, a recycled address, another tenant's
+/// machine on a bridge that should not have been shared — each of those answers
+/// a probe perfectly, and a one-ended check calls the path healthy.
+///
+/// So both ends report independently and Core compares. TCP already proves
+/// bidirectionality at the transport layer; what this adds is **identity** (the
+/// machine that answered is the machine we sold) and **attribution** (which hop
+/// failed, from who saw what).
+///
+/// Four outcomes, and the second is the one nothing else can find:
+///
+/// ```text
+/// both saw it            the path works, and the responder is the right machine
+/// prober only            something answered that was not our machine
+/// responder only         someone is reaching it by a path we did not open
+/// neither                the path is down; the hop checks localize it
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReachabilityReport {
+    /// The endpoint this probe was for.
+    pub endpoint_id: String,
+    /// What was dialled, as `address:port`.
+    pub target: String,
+    pub outcome: ProbeOutcome,
+    /// The address the prober dialled *from*. This is what the responder will
+    /// have seen, and it is what makes the two accounts comparable without
+    /// trusting either end's clock very far.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Seconds since the epoch, by the prober's clock. Used only to bound a
+    /// comparison window — never to order events, because two machines'
+    /// clocks disagreeing is ordinary and not a fault.
+    pub at_unix: u64,
+    #[serde(default)]
+    pub rtt_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeOutcome {
+    /// A connection was established.
+    Connected,
+    /// Something is there and said no. Very different from silence: refused
+    /// means the path works and the service does not.
+    Refused,
+    /// Silence. The usual shape of a broken overlay or a missing policy.
+    TimedOut,
+    /// No route at all.
+    Unreachable,
+}
+
+/// A connection the responder actually saw, from inside the machine.
+///
+/// The other half of the handshake. Observed rather than answered, because the
+/// Workload Agent deliberately listens on nothing — the thing that accepts the
+/// connection is the buyer's own service, which is also exactly what a buyer
+/// reaches, so probing anything else would prove less.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedPeer {
+    /// Who connected, as the guest saw them.
+    pub peer: String,
+    /// The local port they reached.
+    pub port: u16,
+    pub at_unix: u64,
 }
 
 /// One line of the agent's own audit log, travelling up to the marketplace.
@@ -944,6 +1020,7 @@ mod workload_tests {
                 prompt_tokens_total: 100,
                 generation_tokens_total: 40,
             }),
+            observed: vec![],
         }
     }
 
@@ -1075,5 +1152,169 @@ mod selfcheck_tests {
         }
         let none: JustChecks = serde_json::from_str("{}").unwrap();
         assert!(none.checks.is_empty());
+    }
+}
+
+/// Comparing the two ends of a probe.
+///
+/// Deliberately a pure function on the protocol crate: both Core and anything
+/// third-party reading these reports should agree on what the pair means, and
+/// the meaning is the whole point of collecting two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Corroboration {
+    /// Both ends saw it. The path works and the responder is the right machine.
+    Confirmed,
+    /// The prober connected and the machine never saw it. **Something else
+    /// answered**: a stale NAT entry, a recycled address, another tenant's
+    /// machine on a bridge that should not be shared. A one-ended check calls
+    /// this healthy, which is why there are two.
+    Impostor,
+    /// The machine saw a connection the prober did not make. Someone is
+    /// reaching it by a path nobody opened.
+    Unexpected,
+    /// Neither end saw anything. The path is down; the hop checks localize it.
+    Down,
+    /// Not enough to say — the responder has not reported since the probe, or
+    /// predates this. Never to be shown as either good or bad news.
+    Unknown,
+}
+
+/// How far apart two clocks may be before a pair is no longer comparable.
+///
+/// Generous on purpose. Guest clocks drift, and a machine that has just booted
+/// may be minutes out until NTP settles; treating that as a failed handshake
+/// would make the check fire loudest exactly when a machine is new.
+pub const CORROBORATION_WINDOW_SECS: u64 = 180;
+
+/// Whether a probe and what the machine saw are the same event.
+///
+/// Matched on the prober's source address first and the clock only as a bound,
+/// because the addresses are facts both ends observe directly and the clocks
+/// are not.
+pub fn corroborate(
+    probe: &ReachabilityReport,
+    observed: &[ObservedPeer],
+    responder_reported_at: Option<u64>,
+) -> Corroboration {
+    let Some(reported_at) = responder_reported_at else {
+        return Corroboration::Unknown;
+    };
+    // The machine has not spoken since the probe, so its silence says nothing.
+    if reported_at + CORROBORATION_WINDOW_SECS < probe.at_unix {
+        return Corroboration::Unknown;
+    }
+
+    let source = probe.source.as_deref();
+    let saw_this_prober = observed.iter().any(|o| {
+        source.is_some_and(|s| o.peer == s)
+            && o.at_unix + CORROBORATION_WINDOW_SECS >= probe.at_unix
+            && probe.at_unix + CORROBORATION_WINDOW_SECS >= o.at_unix
+    });
+
+    match (probe.outcome, saw_this_prober) {
+        (ProbeOutcome::Connected, true) => Corroboration::Confirmed,
+        // Connected to something that is not this machine.
+        (ProbeOutcome::Connected, false) => Corroboration::Impostor,
+        // Refused is the service saying no over a working path, so the machine
+        // legitimately may not record an established connection. Not evidence
+        // of an impostor.
+        (ProbeOutcome::Refused, _) => Corroboration::Down,
+        (_, true) => Corroboration::Unexpected,
+        (_, false) => Corroboration::Down,
+    }
+}
+
+#[cfg(test)]
+mod handshake_tests {
+    use super::*;
+
+    fn probe(outcome: ProbeOutcome, at: u64) -> ReachabilityReport {
+        ReachabilityReport {
+            endpoint_id: "ep1".into(),
+            target: "10.200.99.10:8080".into(),
+            outcome,
+            source: Some("100.93.27.247".into()),
+            at_unix: at,
+            rtt_ms: Some(3),
+        }
+    }
+
+    fn seen(peer: &str, at: u64) -> ObservedPeer {
+        ObservedPeer { peer: peer.into(), port: 8080, at_unix: at }
+    }
+
+    #[test]
+    fn both_ends_agreeing_is_the_only_confirmation() {
+        let c = corroborate(&probe(ProbeOutcome::Connected, 1000), &[seen("100.93.27.247", 1000)], Some(1010));
+        assert_eq!(c, Corroboration::Confirmed);
+    }
+
+    /// The case a single-ended check cannot see, and the reason for all of
+    /// this: the prober connected to *something*, and it was not our machine.
+    #[test]
+    fn connected_to_something_that_is_not_our_machine() {
+        let c = corroborate(&probe(ProbeOutcome::Connected, 1000), &[], Some(1010));
+        assert_eq!(c, Corroboration::Impostor);
+        // And a connection from a *different* source is not our probe either.
+        let c = corroborate(&probe(ProbeOutcome::Connected, 1000), &[seen("10.0.0.9", 1000)], Some(1010));
+        assert_eq!(c, Corroboration::Impostor);
+    }
+
+    #[test]
+    fn neither_end_saw_anything() {
+        assert_eq!(
+            corroborate(&probe(ProbeOutcome::TimedOut, 1000), &[], Some(1010)),
+            Corroboration::Down
+        );
+    }
+
+    /// Someone reached the machine by a path we did not open. Worth surfacing:
+    /// on a correctly fenced bridge it should be impossible.
+    #[test]
+    fn a_connection_nobody_made() {
+        let c = corroborate(&probe(ProbeOutcome::TimedOut, 1000), &[seen("100.93.27.247", 1000)], Some(1010));
+        assert_eq!(c, Corroboration::Unexpected);
+    }
+
+    /// Refused means the path works and the service does not — the machine may
+    /// never record an established connection, so this must not read as an
+    /// impostor.
+    #[test]
+    fn refused_is_a_working_path_with_a_dead_service() {
+        assert_eq!(
+            corroborate(&probe(ProbeOutcome::Refused, 1000), &[], Some(1010)),
+            Corroboration::Down
+        );
+    }
+
+    /// A machine that has not spoken since the probe tells us nothing, and
+    /// must not be counted against it.
+    #[test]
+    fn a_silent_responder_is_unknown_not_guilty() {
+        assert_eq!(corroborate(&probe(ProbeOutcome::Connected, 5000), &[], None), Corroboration::Unknown);
+        // Reported long before the probe: its account cannot cover it.
+        assert_eq!(
+            corroborate(&probe(ProbeOutcome::Connected, 5000), &[], Some(100)),
+            Corroboration::Unknown
+        );
+    }
+
+    /// Clocks drift, and a machine minutes out of step must not read as a
+    /// failed handshake — that would fire loudest exactly when a machine is new.
+    #[test]
+    fn clock_drift_inside_the_window_still_corroborates() {
+        let c = corroborate(
+            &probe(ProbeOutcome::Connected, 1000),
+            &[seen("100.93.27.247", 1000 + CORROBORATION_WINDOW_SECS - 1)],
+            Some(1200),
+        );
+        assert_eq!(c, Corroboration::Confirmed);
+    }
+
+    #[test]
+    fn a_probe_survives_a_round_trip() {
+        let p = probe(ProbeOutcome::Connected, 1000);
+        assert_eq!(serde_json::from_str::<ReachabilityReport>(&serde_json::to_string(&p).unwrap()).unwrap(), p);
     }
 }
