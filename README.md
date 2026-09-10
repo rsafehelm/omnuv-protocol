@@ -27,4 +27,18 @@ omnuv-protocol = { git = "https://github.com/rsafehelm/omnuv-protocol", tag = "v
 Additive fields carrying `#[serde(default)]` do not bump it, because an older
 peer ignores them and a newer one fills them in.
 
-Licensed under Apache-2.0.
+## Licence
+
+GNU General Public License, version 3 or later, like the agent that depends on
+it.
+
+One consequence is worth stating plainly rather than leaving for somebody to
+discover. Omnuv Core links this crate and is not open source. That is consistent
+because the GPL's obligations attach to **conveying** a program, and Core is
+never conveyed: it runs as a service on infrastructure the marketplace operates,
+and nobody receives a copy of it. Running a program is not distributing it.
+
+If Core were ever shipped to run on somebody else's hardware, that would be
+distribution, and this licence would then require its source. That is a real
+constraint on a future business decision, and it is written here so the decision
+is made knowingly.

@@ -2,7 +2,7 @@
 name = "omnuv-protocol"
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/rsafehelm/omnuv-protocol"
 description = "Public wire contract between Omnuv Core and Omnuv Provider agents."
 
