@@ -412,6 +412,43 @@ pub enum InstanceState {
     Error,
 }
 
+/// How a recipe's install went, as the guest itself reports it.
+///
+/// Named for the recipe rather than for first boot, because `FirstBoot` above
+/// is already the *mechanism* an image uses. This is the outcome.
+///
+/// A recipe installs through cloud-init inside the machine, and until this
+/// existed nothing outside the machine could tell a finished install from an
+/// abandoned one: the VM boots, answers, and reports Running either way. Two
+/// gaming machines sat like that for a day.
+///
+/// The provider reads it through the hypervisor's guest-agent channel — the
+/// hypervisor asking the guest, not marketplace software running inside a
+/// buyer's machine, which is a boundary that must not move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeProgress {
+    /// cloud-init's own word for it: `running`, `done`, `error`, `disabled`,
+    /// or `unknown` when the guest could not be asked.
+    pub status: String,
+    /// Which recipe step it was on, when the guest said so: "3/6".
+    #[serde(default)]
+    pub step: Option<String>,
+    /// The failure, in the words the guest used. Never a summary invented
+    /// here — a person debugging this needs the original.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+impl RecipeProgress {
+    pub fn finished(&self) -> bool {
+        self.status == "done" || self.status == "disabled"
+    }
+
+    pub fn failed(&self) -> bool {
+        self.status == "error"
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceStatus {
     /// Whether trying again could plausibly work. `Some(false)` says stop: the
@@ -436,6 +473,11 @@ pub struct InstanceStatus {
     pub private_ip: Option<String>,
     #[serde(default)]
     pub message: Option<String>,
+    /// Only for a machine that was given a recipe, and only until it settles.
+    /// Additive and defaulted, so an older agent that never sends it is not a
+    /// protocol break — it simply reports nothing, as it always did.
+    #[serde(default)]
+    pub recipe_progress: Option<RecipeProgress>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
