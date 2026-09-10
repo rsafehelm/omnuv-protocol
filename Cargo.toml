@@ -1,12 +1,15 @@
 [package]
 name = "omnuv-protocol"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/rsafehelm/omnuv-protocol"
 description = "Public wire contract between Omnuv Core and Omnuv Provider agents."
 
 [dependencies]
-serde = { workspace = true }
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-serde_json = { workspace = true }
+serde_json = "1"
+
+[workspace]

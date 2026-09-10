@@ -1,0 +1,30 @@
+# omnuv-protocol
+
+The versioned wire contract between **Omnuv Core** and an **Omnuv Provider
+Agent**. It describes resource semantics and nothing else: no pricing, no
+provider ranking, no scheduling policy. Both sides depend on this crate and
+neither imports the other's source.
+
+That separation is the point. A provider runs software that can create virtual
+machines, attach their GPUs and configure their networking, and they should be
+able to read it. This crate is the boundary that makes the rest of the agent
+publishable.
+
+Provider-local identifiers — hypervisor node names, PCI addresses, machine ids —
+cross this boundary only as opaque strings. Core stores them so an agent can
+recover state after a restart, and never parses or branches on their contents.
+
+## Using it
+
+```toml
+[dependencies]
+omnuv-protocol = { git = "https://github.com/rsafehelm/omnuv-protocol", tag = "v0.1.0" }
+```
+
+## Versioning
+
+`PROTOCOL_VERSION` is bumped on any breaking change to the message shapes.
+Additive fields carrying `#[serde(default)]` do not bump it, because an older
+peer ignores them and a newer one fills them in.
+
+Licensed under Apache-2.0.
