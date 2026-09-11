@@ -68,6 +68,64 @@ pub struct NodeInventory {
     pub disk_gib: u64,
     #[serde(default)]
     pub gpus: Vec<GpuDevice>,
+    /// What this node has already committed to guests the marketplace did not
+    /// create. Advertised capacity minus this is what can honestly be sold.
+    #[serde(default)]
+    pub committed: Option<HostCommitment>,
+}
+
+/// What the host itself has committed, beyond anything the marketplace created.
+///
+/// A provider advertises capacity; the ledger books against that number and
+/// nothing else. So a host advertising 64 cores while its owner runs a 60-core
+/// workload of their own passes every oversell check we have, and the first
+/// sign of trouble is a buyer's machine that will not start.
+///
+/// This is the missing half of that sum. It counts what the hypervisor has
+/// handed to guests the marketplace did not create — deliberately not *what
+/// those guests are*, which is the provider's business and none of ours.
+/// Optional, because an older agent does not measure it and a guess would be
+/// worse than an absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostCommitment {
+    /// vCPUs configured on guests the marketplace did not create.
+    pub cpu_cores: u32,
+    pub memory_mib: u64,
+    pub disk_gib: u64,
+    /// How many such guests there are. A count, never an identity.
+    pub guests: u32,
+}
+
+/// One network adapter on a machine, and whether anything has ever crossed it.
+///
+/// **Holding an address is not the same as the address working.** Until this
+/// existed, Core knew a machine's IP because the agent read it out of the
+/// hypervisor's config and said so — `source: reported`, `observed: never` —
+/// and the console's own footnote had to admit that an address being listed
+/// "means the ledger holds it, not that a packet has ever crossed it".
+///
+/// The host can do better without touching the guest at all: its neighbour
+/// table says which addresses have actually answered on each bridge. That is a
+/// real observation, it costs one read per reconcile, it needs no guest agent,
+/// and it keeps working when the guest's own agent is dead — which is exactly
+/// when somebody wants to know whether the machine is on the network.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterStatus {
+    /// Provider-local adapter name, `net0`, `net1`. Opaque to Core.
+    pub name: String,
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub mac: Option<String>,
+    /// When the host last saw traffic from this address, if it ever has.
+    /// `None` means not observed — which is information, not a failure.
+    #[serde(default)]
+    pub observed_at_unix: Option<u64>,
+    /// How it was seen: `neighbour` for the host's own ARP/ND table. Named
+    /// rather than boolean, because "we saw it" is worth much less than "we
+    /// saw it *this way*" when the reading later turns out to be wrong.
+    #[serde(default)]
+    pub observed_by: Option<String>,
 }
 
 /// Where the hardware physically is. Declared by the operator, not discovered:
@@ -239,9 +297,20 @@ pub struct GatewayStatus {
     pub state: GatewayState,
     #[serde(default)]
     pub local_id: Option<String>,
-    /// The address the gateway holds on the overlay, once it has one.
+    /// The address the gateway holds **on the overlay**, once it has one.
+    ///
+    /// Read from the overlay client's own status, never from the guest's
+    /// primary NIC: until 11 September this carried the gateway's LAN address,
+    /// which is a different network, looked entirely plausible, and made the
+    /// map draw an overlay link between two addresses that were never on the
+    /// overlay.
     #[serde(default)]
     pub overlay_address: Option<String>,
+    /// Every adapter this machine has, and whether the host has actually seen
+    /// traffic from each. Additive: an older agent sends none and Core falls
+    /// back to the single address below, believed but never witnessed.
+    #[serde(default)]
+    pub adapters: Vec<AdapterStatus>,
     #[serde(default)]
     pub message: Option<String>,
 }
@@ -471,6 +540,11 @@ pub struct InstanceStatus {
     pub local_id: Option<String>,
     #[serde(default)]
     pub private_ip: Option<String>,
+    /// Every adapter this machine has, and whether the host has actually seen
+    /// traffic from each. Additive: an older agent sends none and Core falls
+    /// back to the single address below, believed but never witnessed.
+    #[serde(default)]
+    pub adapters: Vec<AdapterStatus>,
     #[serde(default)]
     pub message: Option<String>,
     /// Only for a machine that was given a recipe, and only until it settles.
@@ -552,6 +626,17 @@ pub struct WorkerStatus {
     pub local_id: Option<String>,
     #[serde(default)]
     pub endpoint: Option<String>,
+    /// Every adapter this machine has, and whether the host has actually seen
+    /// traffic from each. Additive: an older agent sends none and Core falls
+    /// back to the single address below, believed but never witnessed.
+    #[serde(default)]
+    pub adapters: Vec<AdapterStatus>,
+    /// A note about this worker's *state*, and only that.
+    ///
+    /// Core stores it in a column called `last_error` and the console paints it
+    /// in a warning box, so anything put here reads as a fault. A healthy
+    /// worker's VM name sat in that box for a day because this looked like a
+    /// free-text slot. Leave it `None` when there is nothing wrong.
     #[serde(default)]
     pub message: Option<String>,
     /// What the Workload Agent inside this machine last said about itself.
@@ -783,6 +868,40 @@ pub enum ProbeOutcome {
 /// Workload Agent deliberately listens on nothing — the thing that accepts the
 /// connection is the buyer's own service, which is also exactly what a buyer
 /// reaches, so probing anything else would prove less.
+/// One overlay link, as the gateway at one end actually experiences it.
+///
+/// Until this existed the map could say two gateways were *members of the same
+/// network* and nothing more. "Both ends report peers" was the strongest claim
+/// available, which is a statement about paperwork: it survives a tunnel that
+/// has not completed a handshake in an hour, and it cannot tell a direct path
+/// from one being relayed twice through the platform at 90 ms.
+///
+/// A link is directional on purpose. Overlay paths are not symmetric — one end
+/// can hole-punch while the other falls back to the relay — and averaging the
+/// two ends into one number hides exactly the case worth seeing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkReport {
+    /// The gateway this was observed *from*.
+    pub gateway_id: String,
+    /// The peer's overlay name as the client knows it, e.g. `omnuv-gw-abcd1234`.
+    pub peer: String,
+    #[serde(default)]
+    pub peer_address: Option<String>,
+    /// True when the path goes through the marketplace's relay rather than
+    /// directly. For a gateway pair that is Edge Rule 2 being violated; for a
+    /// client device it is ordinary NAT traversal working as designed.
+    pub relayed: bool,
+    /// Round trip as the overlay client measured it. `None` when it has not
+    /// measured one yet — never zero, which would read as instant.
+    #[serde(default)]
+    pub rtt_ms: Option<u32>,
+    /// The last completed WireGuard handshake. A link with a latency and an
+    /// hour-old handshake is a link that is down; the number alone would lie.
+    #[serde(default)]
+    pub last_handshake_unix: Option<u64>,
+    pub at_unix: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservedPeer {
     /// Who connected, as the guest saw them.
@@ -833,6 +952,10 @@ pub struct StatusReport {
     /// Core ignores it, and an older agent sends none.
     #[serde(default)]
     pub checks: Vec<SelfCheck>,
+    /// Every overlay link this provider's gateways can currently see, with the
+    /// latency each measured. Additive, same reasoning as `checks`.
+    #[serde(default)]
+    pub links: Vec<LinkReport>,
 }
 
 /// Frames on the reverse tunnel.
@@ -931,6 +1054,7 @@ mod tests {
                 cpu_cores: 16,
                 memory_mib: 65536,
                 disk_gib: 1000,
+                committed: None,
                 gpus: vec![GpuDevice {
                     local_id: "0000:01:00.0".into(),
                     vendor: "NVIDIA".into(),
@@ -1049,6 +1173,7 @@ mod workload_tests {
             state: WorkerState::Ready,
             local_id: None,
             endpoint: None,
+            adapters: Vec::new(),
             message: None,
             telemetry: Some(report()),
         })
@@ -1316,5 +1441,125 @@ mod handshake_tests {
     fn a_probe_survives_a_round_trip() {
         let p = probe(ProbeOutcome::Connected, 1000);
         assert_eq!(serde_json::from_str::<ReachabilityReport>(&serde_json::to_string(&p).unwrap()).unwrap(), p);
+    }
+}
+
+/// The compatibility review for the 11 September additions, made mechanical.
+///
+/// Four fields were added at once — `adapters`, `links`, `committed` and the
+/// meaning of `overlay_address` — and none of them bumps `PROTOCOL_VERSION`,
+/// because each is additive and defaulted. That claim is worth exactly as much
+/// as the test that proves it, so here it is in both directions: an older peer
+/// must ignore what it does not know, and a newer peer must read an older
+/// peer's silence as "not measured" rather than as zero.
+#[cfg(test)]
+mod additions_of_11_september {
+    use super::*;
+
+    #[test]
+    fn an_older_core_ignores_adapters_it_does_not_know() {
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct InstanceStatusAsItWasBefore {
+            id: String,
+            state: InstanceState,
+            private_ip: Option<String>,
+        }
+        let sent = serde_json::to_string(&InstanceStatus {
+            retryable: None,
+            waiting_on: None,
+            id: "i1".into(),
+            state: InstanceState::Running,
+            rebooted_token: None,
+            local_id: Some("101".into()),
+            private_ip: Some("10.200.99.5".into()),
+            adapters: vec![AdapterStatus {
+                name: "net1".into(),
+                address: Some("10.200.99.5".into()),
+                mac: Some("bc:24:11:00:00:01".into()),
+                observed_at_unix: Some(1_789_000_000),
+                observed_by: Some("neighbour".into()),
+            }],
+            message: None,
+            recipe_progress: None,
+        })
+        .unwrap();
+
+        let old: InstanceStatusAsItWasBefore = serde_json::from_str(&sent).unwrap();
+        // The single address is still there, so the old reading is unchanged.
+        assert_eq!(old.private_ip.as_deref(), Some("10.200.99.5"));
+    }
+
+    /// The direction that actually bites. An agent that has not been upgraded
+    /// sends no `adapters`, no `links` and no `committed`, and Core must read
+    /// that as *not measured* — never as an empty set it can act on. Deciding
+    /// a provider has committed zero cores, because it did not say, is how a
+    /// blind spot becomes a wrong number.
+    #[test]
+    fn an_older_agent_reports_absence_not_zero() {
+        let from_an_old_agent = r#"{
+            "protocol_version": 2,
+            "workers": [],
+            "instances": [],
+            "gateways": []
+        }"#;
+        let got: StatusReport = serde_json::from_str(from_an_old_agent).unwrap();
+        assert!(got.links.is_empty(), "no links reported");
+        assert!(got.checks.is_empty());
+
+        let node: NodeInventory = serde_json::from_str(
+            r#"{"local_id":"pve","cpu_cores":16,"memory_mib":65536,"disk_gib":1000}"#,
+        )
+        .unwrap();
+        assert!(
+            node.committed.is_none(),
+            "an unmeasured commitment must be None, never Some(0)"
+        );
+    }
+
+    #[test]
+    fn a_link_survives_a_round_trip_and_keeps_its_direction() {
+        let l = LinkReport {
+            gateway_id: "g1".into(),
+            peer: "omnuv-gw-abcd1234".into(),
+            peer_address: Some("100.93.1.2".into()),
+            relayed: true,
+            rtt_ms: Some(94),
+            last_handshake_unix: Some(1_789_000_000),
+            at_unix: 1_789_000_060,
+        };
+        let back: LinkReport = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        assert_eq!(back, l);
+        // Directional: this is what g1 sees, and says nothing about what the
+        // peer sees back.
+        assert_eq!(back.gateway_id, "g1");
+    }
+
+    /// `rtt_ms: None` and `rtt_ms: Some(0)` are different claims and must not
+    /// collapse into each other on the wire.
+    #[test]
+    fn an_unmeasured_latency_is_not_instant() {
+        let unmeasured = r#"{"gateway_id":"g","peer":"p","relayed":false,"at_unix":1}"#;
+        let l: LinkReport = serde_json::from_str(unmeasured).unwrap();
+        assert_eq!(l.rtt_ms, None);
+        assert_eq!(l.last_handshake_unix, None);
+    }
+
+    /// An address the host has never seen must be distinguishable from one it
+    /// has. This is the whole point of the field: "the ledger holds it" and
+    /// "a packet crossed it" were the same value until now.
+    #[test]
+    fn a_believed_address_is_not_an_observed_one() {
+        let believed: AdapterStatus =
+            serde_json::from_str(r#"{"name":"net0","address":"192.168.1.5"}"#).unwrap();
+        assert!(believed.observed_at_unix.is_none());
+
+        let seen: AdapterStatus = serde_json::from_str(
+            r#"{"name":"net0","address":"192.168.1.5",
+                "observed_at_unix":1789000000,"observed_by":"neighbour"}"#,
+        )
+        .unwrap();
+        assert_eq!(seen.observed_by.as_deref(), Some("neighbour"));
+        assert_ne!(believed.observed_at_unix, seen.observed_at_unix);
     }
 }
