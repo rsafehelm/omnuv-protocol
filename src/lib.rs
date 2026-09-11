@@ -128,6 +128,83 @@ pub struct AdapterStatus {
     pub observed_by: Option<String>,
 }
 
+/// Everything the hypervisor will say about a machine the marketplace owns.
+///
+/// **Scoped to tagged machines, and that is the whole rule.** A machine
+/// carrying a marketplace tag is one Core created and is answerable for, so
+/// there is no reason to be shy about it: the more that comes back, the fewer
+/// root-cause analyses end with somebody logging into a hypervisor. A machine
+/// *without* a marketplace tag is the provider's own business and nothing about
+/// it is reported at all — see `HostCommitment`, which is aggregate, opt-in and
+/// audited, and is the only exception.
+///
+/// Every field is optional because every field comes from a call that can fail,
+/// and a diagnostic that invents a value is worse than one that admits it could
+/// not look.
+// No `Eq`: pressure is a float, and two readings being "equal" is not a
+// question worth being able to ask of a measurement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Diagnostics {
+    /// The hypervisor's own view: `running`, `paused`, `prelaunch`, `shutdown`.
+    /// Distinct from the marketplace state, and the difference is the finding —
+    /// `paused` reads as "up" from every angle except this one.
+    #[serde(default)]
+    pub run_state: Option<String>,
+    /// A hypervisor lock: backup, migrate, snapshot, clone, rollback.
+    ///
+    /// The single most common reason a reconcile looks stuck for no visible
+    /// reason: every call returns success, nothing changes, and the machine is
+    /// simply not accepting work because somebody's backup is running.
+    #[serde(default)]
+    pub lock: Option<String>,
+    /// Seconds since this machine booted. A number that keeps resetting is a
+    /// boot loop, which looks identical to "slow to start" without it.
+    #[serde(default)]
+    pub uptime_s: Option<u64>,
+    /// What the hypervisor actually gave it, so Core can compare against what
+    /// it asked for. Drift is otherwise completely silent: a machine can run
+    /// for months with half the memory that was sold.
+    #[serde(default)]
+    pub vcpus: Option<u32>,
+    #[serde(default)]
+    pub memory_mib: Option<u64>,
+    #[serde(default)]
+    pub memory_used_mib: Option<u64>,
+    #[serde(default)]
+    pub disk_gib: Option<u64>,
+    /// Kernel pressure-stall percentages: the share of time *something* was
+    /// waiting on this resource.
+    ///
+    /// The best answer to "why is this slow" that exists without entering the
+    /// guest. Utilisation says a resource is busy; pressure says somebody is
+    /// being made to wait for it, which is the thing the buyer feels.
+    #[serde(default)]
+    pub pressure_cpu: Option<f32>,
+    #[serde(default)]
+    pub pressure_io: Option<f32>,
+    #[serde(default)]
+    pub pressure_memory: Option<f32>,
+    /// Whether the guest agent answered on this pass. Separates "the machine is
+    /// down" from "the machine is up and we cannot see inside it", which are
+    /// the same symptom and completely different faults.
+    #[serde(default)]
+    pub guest_agent: Option<bool>,
+    /// PCI addresses actually attached. A GPU that was sold and did not attach
+    /// is visible here rather than only to somebody reading the VM config by
+    /// hand on the host.
+    #[serde(default)]
+    pub pci: Vec<String>,
+    /// Which node of the provider's cluster it landed on.
+    #[serde(default)]
+    pub node: Option<String>,
+    /// The most recent failed hypervisor task for this machine, with its exit
+    /// status. Fetched only when the machine is not healthy: the answer to
+    /// "what went wrong" usually already exists in the hypervisor's own task
+    /// log, and nothing was carrying it up.
+    #[serde(default)]
+    pub last_task_error: Option<String>,
+}
+
 /// Where the hardware physically is. Declared by the operator, not discovered:
 /// nothing on a hypervisor knows its own latitude, and IP geolocation is wrong
 /// often enough to be worse than absent. Optional, because a provider may
@@ -280,7 +357,7 @@ pub enum GatewayState {
     Offline,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GatewayStatus {
     /// Whether trying again could plausibly work. `Some(false)` says stop: the
     /// image is not offered here, the spec is impossible, the card is gone.
@@ -311,6 +388,10 @@ pub struct GatewayStatus {
     /// back to the single address below, believed but never witnessed.
     #[serde(default)]
     pub adapters: Vec<AdapterStatus>,
+    /// Everything the hypervisor will say about this machine. Additive: an
+    /// older agent sends none, and none means "not collected", never "healthy".
+    #[serde(default)]
+    pub diagnostics: Option<Diagnostics>,
     #[serde(default)]
     pub message: Option<String>,
 }
@@ -518,7 +599,7 @@ impl RecipeProgress {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceStatus {
     /// Whether trying again could plausibly work. `Some(false)` says stop: the
     /// image is not offered here, the spec is impossible, the card is gone.
@@ -545,6 +626,10 @@ pub struct InstanceStatus {
     /// back to the single address below, believed but never witnessed.
     #[serde(default)]
     pub adapters: Vec<AdapterStatus>,
+    /// Everything the hypervisor will say about this machine. Additive: an
+    /// older agent sends none, and none means "not collected", never "healthy".
+    #[serde(default)]
+    pub diagnostics: Option<Diagnostics>,
     #[serde(default)]
     pub message: Option<String>,
     /// Only for a machine that was given a recipe, and only until it settles.
@@ -607,7 +692,7 @@ pub enum WorkerState {
 }
 
 /// Normalized worker state reported upward. `local_id` is opaque to Core.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkerStatus {
     /// Whether trying again could plausibly work. `Some(false)` says stop: the
     /// image is not offered here, the spec is impossible, the card is gone.
@@ -631,6 +716,10 @@ pub struct WorkerStatus {
     /// back to the single address below, believed but never witnessed.
     #[serde(default)]
     pub adapters: Vec<AdapterStatus>,
+    /// Everything the hypervisor will say about this machine. Additive: an
+    /// older agent sends none, and none means "not collected", never "healthy".
+    #[serde(default)]
+    pub diagnostics: Option<Diagnostics>,
     /// A note about this worker's *state*, and only that.
     ///
     /// Core stores it in a column called `last_error` and the console paints it
@@ -934,7 +1023,7 @@ pub struct AuditEntry {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusReport {
     pub protocol_version: u32,
     /// A slice of the agent's own audit log since the last report. Bounded by
@@ -1174,6 +1263,7 @@ mod workload_tests {
             local_id: None,
             endpoint: None,
             adapters: Vec::new(),
+            diagnostics: None,
             message: None,
             telemetry: Some(report()),
         })
@@ -1480,6 +1570,7 @@ mod additions_of_11_september {
                 observed_at_unix: Some(1_789_000_000),
                 observed_by: Some("neighbour".into()),
             }],
+            diagnostics: None,
             message: None,
             recipe_progress: None,
         })
