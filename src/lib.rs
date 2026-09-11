@@ -229,8 +229,19 @@ pub struct InventoryReport {
     pub city: Option<String>,
     /// Marketplace image ids this provider can build. The template behind
     /// each one is the agent's own configuration and is never reported.
+    ///
+    /// Read from the configuration, so it says what the agent was *asked* to
+    /// offer. `held_images` says what is actually there; prefer it where both
+    /// are present, and keep this for an agent that predates the catalogue.
     #[serde(default)]
     pub images: Vec<String>,
+    /// What this provider is actually holding, with the digest of each.
+    ///
+    /// Additive: an agent that does not send it is one that cannot yet mirror,
+    /// and Core falls back to `images` for it rather than concluding the
+    /// provider holds nothing.
+    #[serde(default)]
+    pub held_images: Vec<HeldImage>,
 }
 
 impl InventoryReport {
@@ -278,6 +289,69 @@ pub struct DesiredState {
     /// agent reports it gone.
     #[serde(default)]
     pub gateways: Vec<GatewaySpec>,
+    /// The image catalogue: every image the marketplace publishes, with the
+    /// digest that defines it and where to fetch it.
+    ///
+    /// **Offered, not imposed.** This is "here is what exists", never "you
+    /// must hold all of this". A provider holds the subset it chooses — every
+    /// image is disk, bandwidth and time, which is the provider's operational
+    /// cost like keeping the hypervisor patched — and placement follows what
+    /// it actually holds. Fewer images, fewer opportunities to earn; the
+    /// incentive does the regulating, so nothing has to be enforced.
+    #[serde(default)]
+    pub images: Vec<ImageArtefact>,
+}
+
+/// One image in the marketplace catalogue: the bytes, and where to get them.
+///
+/// Distinct from `ImageSpec`, which travels with a machine and says what the
+/// image *means* — its OS family, its first-boot generator, the account the
+/// buyer gets. This says what it *is*. The agent needs only this to mirror an
+/// image; the semantics reach it attached to the instance that uses them.
+///
+///
+/// **The digest is the contract.** An image id has to mean the same machine on
+/// every provider carrying it, and the only way to make that a fact rather
+/// than a hope is to build the bytes once and have everybody else verify they
+/// hold those bytes. A provider that built locally from "this base plus these
+/// packages" would get different bytes on a different day from a moving
+/// archive, and nothing could tell a legitimate difference from drift.
+///
+/// So a provider **mirrors** an image and never builds one. It may decline an
+/// image; it may not redefine one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageArtefact {
+    /// The marketplace id — `ubuntu-26.04`, `ubuntu-26.04-gaming`. What a
+    /// buyer's machine names, and what the scheduler matches against.
+    pub id: String,
+    /// Lowercase hex sha256 of the artefact. Verified **before** it is
+    /// imported: a half-fetched image imported as a template is a machine that
+    /// boots wrong, which is worse than a machine that does not boot.
+    pub sha256: String,
+    /// Size in bytes, so a provider can decide whether it has room before
+    /// spending an hour finding out that it does not.
+    pub bytes: u64,
+    /// Where to fetch it. Absolute, and reached over TLS like everything else
+    /// the agent talks to.
+    pub url: String,
+}
+
+/// An image a provider is actually holding, and the digest of what it holds.
+///
+/// Separate from `InventoryReport::images`, which is a list of ids read from
+/// the agent's own configuration — a claim about *intent*, where a template
+/// that was never built and one that was deleted advertise exactly the same
+/// thing. This is *observed state is written only from observation* applied to
+/// the one place an image id was still taken on trust, and it is the whole
+/// mechanism by which drift becomes visible rather than assumed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldImage {
+    pub id: String,
+    /// The digest of the artefact this template was imported from, as recorded
+    /// at import. A value that does not match the catalogue means this
+    /// provider is behind on that id — which makes it offline *for that id*,
+    /// not offline.
+    pub sha256: String,
 }
 
 /// A provider's overlay gateway for one buyer network.
@@ -1138,6 +1212,12 @@ mod tests {
             // What this provider can build from. Absent means it offers the
             // marketplace's default only.
             images: vec!["ubuntu-26.04".into()],
+            // What it is actually holding, which is the claim Core should
+            // believe. The digest is what makes an image id mean one machine.
+            held_images: vec![HeldImage {
+                id: "ubuntu-26.04".into(),
+                sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+            }],
             nodes: vec![NodeInventory {
                 local_id: "pve".into(),
                 cpu_cores: 16,
@@ -1152,6 +1232,61 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    /// The catalogue is additive in both directions, which is why
+    /// `PROTOCOL_VERSION` does not move for it.
+    #[test]
+    fn the_catalogue_is_invisible_to_a_peer_that_predates_it() {
+        // An agent built before the catalogue deserializes a DesiredState
+        // carrying one, and simply does not see the images.
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct DesiredStateAsItWasBefore {
+            protocol_version: u32,
+            #[serde(default)]
+            version: u64,
+            #[serde(default)]
+            gateways: Vec<GatewaySpec>,
+        }
+
+        let with_catalogue = serde_json::to_string(&DesiredState {
+            protocol_version: PROTOCOL_VERSION,
+            version: 7,
+            unchanged: false,
+            inference_workers: Vec::new(),
+            instances: Vec::new(),
+            gateways: Vec::new(),
+            images: vec![ImageArtefact {
+                id: "ubuntu-26.04-gaming".into(),
+                sha256: "abc123".into(),
+                bytes: 8_000_000_000,
+                url: "https://api.omnuv.com/v1/provider/images/ubuntu-26.04-gaming".into(),
+            }],
+        })
+        .unwrap();
+        let old: DesiredStateAsItWasBefore = serde_json::from_str(&with_catalogue).unwrap();
+        assert_eq!(old.version, 7);
+
+        // And the other way: a Core built before the catalogue sends none, so
+        // a new agent sees an empty catalogue rather than failing to parse.
+        // Empty means "nothing published", which is what an older Core means.
+        let without: DesiredState =
+            serde_json::from_str(r#"{"protocol_version":2,"version":7}"#).unwrap();
+        assert!(without.images.is_empty());
+
+        // Same for what comes back up: an agent that cannot mirror sends no
+        // `held_images`, and Core must read that as "does not report digests"
+        // rather than as "holds nothing".
+        // Built by taking a real report and deleting the key, rather than by
+        // hand-writing the schema: a fixture that lists every field is a
+        // second copy of the contract, and it goes stale the first time the
+        // real one gains a required field.
+        let mut v = serde_json::to_value(sample()).unwrap();
+        v.as_object_mut().unwrap().remove("held_images");
+        let report: InventoryReport = serde_json::from_value(v).unwrap();
+        assert!(report.held_images.is_empty());
+        assert_eq!(report.images, vec!["ubuntu-26.04".to_string()]);
     }
 
     #[test]
@@ -1246,6 +1381,7 @@ mod workload_tests {
     /// The whole reason `telemetry` did not bump PROTOCOL_VERSION. An agent
     /// built before this field existed receives it and must ignore it, not
     /// fail: a provider running last month's agent has to keep working.
+    #[test]
     #[test]
     fn an_older_peer_ignores_telemetry_it_does_not_know() {
         #[derive(serde::Deserialize)]
