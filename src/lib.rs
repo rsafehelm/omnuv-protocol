@@ -12,7 +12,17 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any breaking change to the message shapes below.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// **3 as of topology v2's completion (12 September 2026).**
+///
+/// Breaking, and deliberately so. `DesiredState.gateways`,
+/// `StatusReport.gateways` and `StatusReport.links` are gone, along with the
+/// types behind them: v2 makes every buyer machine an overlay peer, so there
+/// is no per-provider gateway to ask for, to report on, or to measure links
+/// from. `CLAUDE.md` said this contract would get a deliberate version rather
+/// than quiet erosion — it is a published interface in a public repository,
+/// and an agent that still sends a gateway status is now told so instead of
+/// being silently ignored.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Wire names are pinned explicitly rather than derived. `rename_all` would
 /// render `K3sKubeVirt` as "k3s-kube-virt", which is not the identifier used
@@ -283,12 +293,6 @@ pub struct DesiredState {
     pub inference_workers: Vec<InferenceWorkerSpec>,
     #[serde(default)]
     pub instances: Vec<InstanceSpec>,
-    /// The overlay gateways this provider should be running: one per buyer
-    /// network that has a machine here. A gateway whose network has no machine
-    /// left on this provider is listed with `Lifecycle::Deleted` until the
-    /// agent reports it gone.
-    #[serde(default)]
-    pub gateways: Vec<GatewaySpec>,
     /// The image catalogue: every image the marketplace publishes, with the
     /// digest that defines it and where to fetch it.
     ///
@@ -354,63 +358,6 @@ pub struct HeldImage {
     pub sha256: String,
 }
 
-/// A provider's overlay gateway for one buyer network.
-///
-/// A small VM, one per buyer network on the provider, and the only kind of
-/// overlay peer there. It exists so that the overlay client never runs on the
-/// hypervisor: a WireGuard interface writing routes there could cover the
-/// management address and take the host — and every guest on it — off the
-/// network.
-///
-/// It carries one buyer's traffic only. It sits on a segment of its own with
-/// that buyer's machines, holds that buyer's key, and answers that buyer's
-/// names; two tenants on one provider never share a segment or a gateway.
-/// Nothing in the Omnuv control plane depends on it, so a broken gateway must
-/// never make a healthy provider look offline.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GatewaySpec {
-    /// How long Core is still prepared to wait for this gateway, in seconds.
-    ///
-    /// The agent owns the fine clock — this clone is taking too long, retry,
-    /// give up — and Core keeps a slower durable backstop in the database. Two
-    /// clocks on purpose: the inner one is cheap and dies with the process,
-    /// which is fine, and the outer one exists precisely because it can.
-    ///
-    /// `None` means Core did not say, and the agent should use its own
-    /// default rather than waiting forever.
-    #[serde(default)]
-    pub budget_secs: Option<u64>,
-    pub id: String,
-    pub lifecycle: Lifecycle,
-    /// The buyer network this gateway serves. The driver derives the network's
-    /// segment on this provider from it, and puts the gateway and the
-    /// network's machines there.
-    #[serde(default)]
-    pub network_id: String,
-    /// Where the overlay control plane lives. The agent does not reach Core
-    /// through this; it is handed to the gateway's overlay client.
-    pub management_url: String,
-    /// Enrols the gateway into exactly one buyer's network. Issued by Core,
-    /// never minted by the provider.
-    pub setup_key: String,
-    /// The project slice this gateway routes. The agent must advertise this and
-    /// nothing wider — never a supernet, never a default route.
-    pub advertise_cidr: Option<String>,
-    /// The gateway's own address on the provider's marketplace bridge, e.g.
-    /// `10.200.4.1/24`. It is the next hop for every buyer machine here.
-    #[serde(default)]
-    pub slice_address: Option<String>,
-    /// Public SSH keys for operator access to the gateway itself.
-    #[serde(default)]
-    pub ssh_keys: Vec<String>,
-    /// The whole project's name → address map, served as `.internal` by the
-    /// gateway's resolver. Every provider's gateway carries every name, which
-    /// is what keeps placement invisible: a buyer machine asks its own
-    /// gateway and gets an answer for a machine anywhere in the project.
-    #[serde(default)]
-    pub dns_records: Vec<DnsRecord>,
-}
-
 /// One private DNS record. Naming is the marketplace's; a provider never
 /// invents a buyer-visible name or address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -419,55 +366,6 @@ pub struct DnsRecord {
     pub name: String,
     /// e.g. `10.200.99.11`
     pub address: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum GatewayState {
-    Pending,
-    Deploying,
-    Ready,
-    Error,
-    Offline,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GatewayStatus {
-    /// Whether trying again could plausibly work. `Some(false)` says stop: the
-    /// image is not offered here, the spec is impossible, the card is gone.
-    /// Without this Core must poll to learn anything, which is the chatter the
-    /// version above exists to remove.
-    #[serde(default)]
-    pub retryable: Option<bool>,
-    /// What this is waiting for, in the agent's own words: "the template to
-    /// finish cloning", "a free card". "Waiting" without "for what" is not
-    /// information.
-    #[serde(default)]
-    pub waiting_on: Option<String>,
-    pub id: String,
-    pub state: GatewayState,
-    #[serde(default)]
-    pub local_id: Option<String>,
-    /// The address the gateway holds **on the overlay**, once it has one.
-    ///
-    /// Read from the overlay client's own status, never from the guest's
-    /// primary NIC: until 11 September this carried the gateway's LAN address,
-    /// which is a different network, looked entirely plausible, and made the
-    /// map draw an overlay link between two addresses that were never on the
-    /// overlay.
-    #[serde(default)]
-    pub overlay_address: Option<String>,
-    /// Every adapter this machine has, and whether the host has actually seen
-    /// traffic from each. Additive: an older agent sends none and Core falls
-    /// back to the single address below, believed but never witnessed.
-    #[serde(default)]
-    pub adapters: Vec<AdapterStatus>,
-    /// Everything the hypervisor will say about this machine. Additive: an
-    /// older agent sends none, and none means "not collected", never "healthy".
-    #[serde(default)]
-    pub diagnostics: Option<Diagnostics>,
-    #[serde(default)]
-    pub message: Option<String>,
 }
 
 /// A buyer's virtual machine, normalized. The driver translates this into
@@ -1074,46 +972,6 @@ pub enum ProbeOutcome {
     Unreachable,
 }
 
-/// A connection the responder actually saw, from inside the machine.
-///
-/// The other half of the handshake. Observed rather than answered, because the
-/// Workload Agent deliberately listens on nothing — the thing that accepts the
-/// connection is the buyer's own service, which is also exactly what a buyer
-/// reaches, so probing anything else would prove less.
-/// One overlay link, as the gateway at one end actually experiences it.
-///
-/// Until this existed the map could say two gateways were *members of the same
-/// network* and nothing more. "Both ends report peers" was the strongest claim
-/// available, which is a statement about paperwork: it survives a tunnel that
-/// has not completed a handshake in an hour, and it cannot tell a direct path
-/// from one being relayed twice through the platform at 90 ms.
-///
-/// A link is directional on purpose. Overlay paths are not symmetric — one end
-/// can hole-punch while the other falls back to the relay — and averaging the
-/// two ends into one number hides exactly the case worth seeing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LinkReport {
-    /// The gateway this was observed *from*.
-    pub gateway_id: String,
-    /// The peer's overlay name as the client knows it, e.g. `omnuv-gw-abcd1234`.
-    pub peer: String,
-    #[serde(default)]
-    pub peer_address: Option<String>,
-    /// True when the path goes through the marketplace's relay rather than
-    /// directly. For a gateway pair that is Edge Rule 2 being violated; for a
-    /// client device it is ordinary NAT traversal working as designed.
-    pub relayed: bool,
-    /// Round trip as the overlay client measured it. `None` when it has not
-    /// measured one yet — never zero, which would read as instant.
-    #[serde(default)]
-    pub rtt_ms: Option<u32>,
-    /// The last completed WireGuard handshake. A link with a latency and an
-    /// hour-old handshake is a link that is down; the number alone would lie.
-    #[serde(default)]
-    pub last_handshake_unix: Option<u64>,
-    pub at_unix: u64,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservedPeer {
     /// Who connected, as the guest saw them.
@@ -1158,16 +1016,10 @@ pub struct StatusReport {
     pub workers: Vec<WorkerStatus>,
     #[serde(default)]
     pub instances: Vec<InstanceStatus>,
-    #[serde(default)]
-    pub gateways: Vec<GatewayStatus>,
     /// What this agent verified about itself on this pass. Additive: an older
     /// Core ignores it, and an older agent sends none.
     #[serde(default)]
     pub checks: Vec<SelfCheck>,
-    /// Every overlay link this provider's gateways can currently see, with the
-    /// latency each measured. Additive, same reasoning as `checks`.
-    #[serde(default)]
-    pub links: Vec<LinkReport>,
 }
 
 /// Frames on the reverse tunnel.
@@ -1345,8 +1197,9 @@ mod tests {
             protocol_version: u32,
             #[serde(default)]
             version: u64,
-            #[serde(default)]
-            gateways: Vec<GatewaySpec>,
+            // No `gateways` any more: the field is gone from the contract as
+            // of protocol 3, and an agent that predates the catalogue reads a
+            // DesiredState without it exactly as it reads one without images.
         }
 
         let with_catalogue = serde_json::to_string(&DesiredState {
@@ -1355,7 +1208,6 @@ mod tests {
             unchanged: false,
             inference_workers: Vec::new(),
             instances: Vec::new(),
-            gateways: Vec::new(),
             images: vec![ImageArtefact {
                 id: "ubuntu-26.04-gaming".into(),
                 sha256: "abc123".into(),
@@ -1823,14 +1675,17 @@ mod additions_of_11_september {
     /// blind spot becomes a wrong number.
     #[test]
     fn an_older_agent_reports_absence_not_zero() {
+        // Still shaped like protocol 2, gateways and all. Those fields are
+        // gone from the contract; an older agent that sends them must not make
+        // Core fail to read the rest of the report.
         let from_an_old_agent = r#"{
             "protocol_version": 2,
             "workers": [],
             "instances": [],
-            "gateways": []
+            "gateways": [],
+            "links": []
         }"#;
         let got: StatusReport = serde_json::from_str(from_an_old_agent).unwrap();
-        assert!(got.links.is_empty(), "no links reported");
         assert!(got.checks.is_empty());
 
         let node: NodeInventory = serde_json::from_str(
@@ -1841,34 +1696,6 @@ mod additions_of_11_september {
             node.committed.is_none(),
             "an unmeasured commitment must be None, never Some(0)"
         );
-    }
-
-    #[test]
-    fn a_link_survives_a_round_trip_and_keeps_its_direction() {
-        let l = LinkReport {
-            gateway_id: "g1".into(),
-            peer: "omnuv-gw-abcd1234".into(),
-            peer_address: Some("100.93.1.2".into()),
-            relayed: true,
-            rtt_ms: Some(94),
-            last_handshake_unix: Some(1_789_000_000),
-            at_unix: 1_789_000_060,
-        };
-        let back: LinkReport = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
-        assert_eq!(back, l);
-        // Directional: this is what g1 sees, and says nothing about what the
-        // peer sees back.
-        assert_eq!(back.gateway_id, "g1");
-    }
-
-    /// `rtt_ms: None` and `rtt_ms: Some(0)` are different claims and must not
-    /// collapse into each other on the wire.
-    #[test]
-    fn an_unmeasured_latency_is_not_instant() {
-        let unmeasured = r#"{"gateway_id":"g","peer":"p","relayed":false,"at_unix":1}"#;
-        let l: LinkReport = serde_json::from_str(unmeasured).unwrap();
-        assert_eq!(l.rtt_ms, None);
-        assert_eq!(l.last_handshake_unix, None);
     }
 
     /// An address the host has never seen must be distinguishable from one it
