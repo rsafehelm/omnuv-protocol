@@ -12,17 +12,29 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any breaking change to the message shapes below.
-/// **3 as of topology v2's completion (12 September 2026).**
+/// **4 as of topology v2's completion (12 September 2026).**
 ///
-/// Breaking, and deliberately so. `DesiredState.gateways`,
-/// `StatusReport.gateways` and `StatusReport.links` are gone, along with the
-/// types behind them: v2 makes every buyer machine an overlay peer, so there
-/// is no per-provider gateway to ask for, to report on, or to measure links
-/// from. `CLAUDE.md` said this contract would get a deliberate version rather
-/// than quiet erosion — it is a published interface in a public repository,
-/// and an agent that still sends a gateway status is now told so instead of
-/// being silently ignored.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// Breaking twice, in two steps, and deliberately so.
+///
+/// **3** removed `DesiredState.gateways`, `StatusReport.gateways` and
+/// `StatusReport.links`, along with the types behind them: v2 makes every buyer
+/// machine an overlay peer, so there is no per-provider gateway to ask for, to
+/// report on, or to measure links from.
+///
+/// **4** finishes the job one field down. `NetworkAttachment.gateway` named the
+/// `.1` of the project network — the gateway's own address on the provider's
+/// bridge — and with the gateway gone it named a machine that had been deleted.
+/// Leaving it would have been worse than untidy: the driver wrote a route for
+/// the whole project prefix through that address and pointed the guest's
+/// `.internal` resolution at it, so a machine built under a v2 Core would have
+/// resolved private names at a dead resolver and timed out, while every status
+/// said `RUNNING`.
+///
+/// `CLAUDE.md` said this contract would get a deliberate version rather than
+/// quiet erosion — it is a published interface in a public repository, and an
+/// agent that still sends a gateway status is told so instead of being
+/// silently ignored.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Wire names are pinned explicitly rather than derived. `rename_all` would
 /// render `K3sKubeVirt` as "k3s-kube-virt", which is not the identifier used
@@ -542,17 +554,27 @@ pub enum AuthMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkAttachment {
     /// The network itself. The driver derives the network's segment on this
-    /// provider from it — the same one the network's gateway sits on.
+    /// provider from it, in whatever its runtime calls a segment. Core does not
+    /// know and must not guess: a bridge id is provider-local, the same class
+    /// as a VMID.
     #[serde(default)]
     pub network_id: String,
     /// e.g. `10.200.4.12`
     pub address: String,
-    /// The whole project network, e.g. `10.200.4.0/24`. Reached through the
-    /// gateway; the machine is configured with a /32 so that addresses on other
-    /// providers are routed rather than assumed to be on this segment.
+    /// The project's prefix, e.g. `10.200.4.0/24`.
+    ///
+    /// **The machine is configured on-link across the whole prefix**, not with
+    /// a /32 and a route. The segment has no uplink and no gateway: it exists
+    /// so that two machines of the same buyer on the same provider can offer
+    /// each other a local candidate instead of meeting on a relay. Everything
+    /// beyond this provider is reached peer to peer over the overlay, which
+    /// installs its own routes.
+    ///
+    /// This is the field that replaced `gateway`, and the change is the whole
+    /// of protocol 4. Under v1 the gateway sat outside the machine's /32, so
+    /// the guest needed an on-link route to it and then the prefix through it;
+    /// with the gateway gone both routes name nothing.
     pub cidr: String,
-    /// The provider's gateway on this network, e.g. `10.200.4.1`.
-    pub gateway: String,
     /// The name the marketplace publishes for this machine.
     #[serde(default)]
     pub dns_name: Option<String>,
