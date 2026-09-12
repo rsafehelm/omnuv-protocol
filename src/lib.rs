@@ -472,7 +472,7 @@ pub struct GatewayStatus {
 
 /// A buyer's virtual machine, normalized. The driver translates this into
 /// runtime-native resources; nothing here names Proxmox, KubeVirt or OpenStack.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct InstanceSpec {
     /// How long Core is still prepared to wait for this machine, in seconds.
     ///
@@ -520,6 +520,47 @@ pub struct InstanceSpec {
     /// deployment. The agent compiles it to what its runtime executes.
     #[serde(default)]
     pub recipe: Option<RecipeSpec>,
+    /// How this machine joins the buyer's overlay, as a peer in its own right.
+    ///
+    /// **Topology v2.** Until 12 September 2026 the overlay client ran only on
+    /// a per-provider gateway, so WireGuard terminated one VM short of the
+    /// machine and every byte between them crossed the provider's bridge in
+    /// clear text. The overlay made a buyer private from other tenants and from
+    /// the internet, and not from their provider. Now the machine is a peer and
+    /// there is no plaintext hop.
+    ///
+    /// `None` for a machine with no private network, and for an agent built
+    /// before v2 — which simply ignores it and builds the machine it always
+    /// did.
+    #[serde(default)]
+    pub overlay: Option<OverlayEnrolment>,
+}
+
+/// What a machine needs to enrol itself into its buyer's overlay.
+///
+/// Core mints the key, scoped to that project's group and to nothing else, one
+/// per machine, and revokes it when the machine goes. The agent writes both
+/// values into first-boot configuration and never stores them: a key that
+/// outlives the boot it was made for is a way to enrol something nobody asked
+/// for.
+///
+/// The address is deliberately **not** here. The overlay allocates it from a
+/// range the marketplace owns and Core records what it assigned — *observed
+/// state is written only from observation* — which is also why peering two of a
+/// buyer's projects can never collide: every peer in the marketplace draws from
+/// one space.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlayEnrolment {
+    /// A single-use enrolment credential for this machine.
+    pub setup_key: String,
+    /// Where the overlay's control plane answers. Reached over the machine's
+    /// own internet interface, on the provider's NAT bridge — never over the
+    /// provider's LAN, which the host drops.
+    pub management_url: String,
+    /// What the peer calls itself, so a person can recognise it in the
+    /// overlay's own listing and revoke the right one.
+    #[serde(default)]
+    pub hostname: Option<String>,
 }
 
 /// A recipe as the machine runtime executes it: a compose file brought up
@@ -713,10 +754,18 @@ pub struct InstanceStatus {
     pub recipe_progress: Option<RecipeProgress>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Lifecycle {
     Running,
+    /// **The default, and the choice is deliberate.** `InstanceSpec::lifecycle`
+    /// is a required field, so this is never what a missing value deserializes
+    /// to — it is only what `Default::default()` builds. Even so, the inert
+    /// variant is the only safe one to pick: a default of `Running` would let a
+    /// half-constructed spec start a machine, and `Deleted` would let one
+    /// remove a machine. `Stopped` does nothing at all, which is the right
+    /// behaviour for an instruction nobody actually gave.
+    #[default]
     Stopped,
     Deleted,
 }
@@ -1232,6 +1281,56 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    /// Enrolment is additive too: an agent built before topology v2 ignores it
+    /// and builds the machine it always did, and a Core built before v2 sends
+    /// none, which a new agent reads as "this machine is not a peer".
+    ///
+    /// That second direction is the one worth testing. `None` has to mean *no
+    /// overlay for this machine* and never *the field was lost in transit* —
+    /// because the two are indistinguishable on the wire, and the safe reading
+    /// is the one that builds a working machine on a provider-local address
+    /// rather than a machine that silently joins nothing and reports success.
+    #[test]
+    fn enrolment_is_invisible_to_a_peer_that_predates_it() {
+        let with = serde_json::to_string(&InstanceSpec {
+            id: "i-1".into(),
+            lifecycle: Lifecycle::Running,
+            name: "gpu-1".into(),
+            vcpus: 4,
+            memory_mib: 8192,
+            disk_gib: 40,
+            overlay: Some(OverlayEnrolment {
+                setup_key: "A-B-C".into(),
+                management_url: "https://api.omnuv.com:8443".into(),
+                hostname: Some("onv-gpu-1".into()),
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+
+        // An older agent deserializes it and simply does not see the field.
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct InstanceSpecAsItWasBefore {
+            id: String,
+            name: String,
+            vcpus: u32,
+        }
+        let old: InstanceSpecAsItWasBefore = serde_json::from_str(&with).unwrap();
+        assert_eq!(old.name, "gpu-1");
+
+        // And a newer agent reading an older Core sees `None`, not an error.
+        let mut v = serde_json::to_value(InstanceSpec {
+            id: "i-2".into(),
+            name: "gpu-2".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        v.as_object_mut().unwrap().remove("overlay");
+        let fresh: InstanceSpec = serde_json::from_value(v).unwrap();
+        assert!(fresh.overlay.is_none());
     }
 
     /// The catalogue is additive in both directions, which is why
