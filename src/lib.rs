@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any breaking change to the message shapes below.
-/// **4 as of topology v2's completion (12 September 2026).**
+/// **5 as of topology v2's completion (12 September 2026).**
 ///
 /// Breaking twice, in two steps, and deliberately so.
 ///
@@ -30,11 +30,23 @@ use serde::{Deserialize, Serialize};
 /// resolved private names at a dead resolver and timed out, while every status
 /// said `RUNNING`.
 ///
+/// **5** finishes it: `NetworkAttachment` loses `address` and `cidr` as well,
+/// so Core no longer numbers a provider's segment. That segment is per-project
+/// and per-provider and has no uplink, so its addresses need only be unique
+/// *within one wire* — which makes them the driver's to choose, exactly like a
+/// VMID or a bridge name. Core keeps what is genuinely marketplace: the
+/// network's identity, the machine's DNS name, and the MAC the guest matches
+/// on.
+///
+/// That is the second half of the addressing decision in `TODO.md` (S1, C′).
+/// The first half was Core recording the address the overlay allocated instead
+/// of inventing one; this is Core stopping inventing the other one too.
+///
 /// `CLAUDE.md` said this contract would get a deliberate version rather than
 /// quiet erosion — it is a published interface in a public repository, and an
 /// agent that still sends a gateway status is told so instead of being
 /// silently ignored.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Wire names are pinned explicitly rather than derived. `rename_all` would
 /// render `K3sKubeVirt` as "k3s-kube-virt", which is not the identifier used
@@ -571,24 +583,18 @@ pub struct NetworkAttachment {
     /// provider from it, in whatever its runtime calls a segment. Core does not
     /// know and must not guess: a bridge id is provider-local, the same class
     /// as a VMID.
+    ///
+    /// **And the addresses on that segment are the driver's too, as of
+    /// protocol 5.** There is no `address` and no `cidr` here. The segment is
+    /// per-project, per-provider and has no uplink, so an address on it need
+    /// only be unique on that one wire — which is a provider-local fact, and
+    /// Core inventing one was the last place it was numbering somebody else's
+    /// network and hoping the two agreed.
+    ///
+    /// What a buyer sees is the overlay address, which the overlay allocates
+    /// from a marketplace range and Core records. See S1 in `TODO.md`.
     #[serde(default)]
     pub network_id: String,
-    /// e.g. `10.200.4.12`
-    pub address: String,
-    /// The project's prefix, e.g. `10.200.4.0/24`.
-    ///
-    /// **The machine is configured on-link across the whole prefix**, not with
-    /// a /32 and a route. The segment has no uplink and no gateway: it exists
-    /// so that two machines of the same buyer on the same provider can offer
-    /// each other a local candidate instead of meeting on a relay. Everything
-    /// beyond this provider is reached peer to peer over the overlay, which
-    /// installs its own routes.
-    ///
-    /// This is the field that replaced `gateway`, and the change is the whole
-    /// of protocol 4. Under v1 the gateway sat outside the machine's /32, so
-    /// the guest needed an on-link route to it and then the prefix through it;
-    /// with the gateway gone both routes name nothing.
-    pub cidr: String,
     /// The name the marketplace publishes for this machine.
     #[serde(default)]
     pub dns_name: Option<String>,
@@ -1368,7 +1374,6 @@ mod workload_tests {
     /// The whole reason `telemetry` did not bump PROTOCOL_VERSION. An agent
     /// built before this field existed receives it and must ignore it, not
     /// fail: a provider running last month's agent has to keep working.
-    #[test]
     #[test]
     fn an_older_peer_ignores_telemetry_it_does_not_know() {
         #[derive(serde::Deserialize)]
