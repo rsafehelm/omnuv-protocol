@@ -148,6 +148,20 @@ pub struct AdapterStatus {
     /// saw it *this way*" when the reading later turns out to be wrong.
     #[serde(default)]
     pub observed_by: Option<String>,
+    /// Addresses the host has seen on this adapter *other than* the one above.
+    ///
+    /// **A field rather than a suffix on `name`, and that distinction is the
+    /// whole reason it exists.** This was appended to the adapter's name —
+    /// `net0 (host has also seen 10.201.0.101)` — because the contract had
+    /// nowhere else to put it. The name is a key: Core stores one observation
+    /// per `(provider, machine, adapter)`, so every distinct note minted a new
+    /// row that the "adapters this machine no longer has" sweep could never
+    /// remove, and the drawing showed adapters with impossible names.
+    ///
+    /// Additive and defaulted, so `PROTOCOL_VERSION` holds: an older agent
+    /// sends nothing here and an older Core ignores it.
+    #[serde(default)]
+    pub also_seen: Vec<String>,
 }
 
 /// Everything the hypervisor will say about a machine the marketplace owns.
@@ -1678,6 +1692,7 @@ mod additions_of_11_september {
                 mac: Some("bc:24:11:00:00:01".into()),
                 observed_at_unix: Some(1_789_000_000),
                 observed_by: Some("neighbour".into()),
+                also_seen: vec!["10.201.0.100".into()],
             }],
             diagnostics: None,
             message: None,
