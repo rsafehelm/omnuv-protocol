@@ -59,7 +59,42 @@ pub const PROTOCOL_VERSION: u32 = 6;
 /// and their `lifecycle` key is read by the alias above, so a provider upgrades
 /// when it chooses rather than when Core does. Removing this is a decision about
 /// abandoning running agents, and should look like one.
+///
+/// **Raising this floor is a hard cutoff, and that is the point.** Negotiation
+/// is the right answer to a version that is merely *old*: both halves work, so
+/// the provider upgrades on its own schedule. It is the wrong answer to a
+/// version that cannot be safely spoken at all — a parsing flaw, a field that
+/// leaks a credential, a fix the old wire format has no way to express. There
+/// the compatible behaviour *is* the vulnerability, and a peer that keeps
+/// speaking it keeps the hole open for as long as its operator is unhurried.
+///
+/// So a version below this floor is **withdrawn**, not deprecated: refused at
+/// the handshake, refused on every subsequent request by an already-connected
+/// agent, never translated, with no grace period to opt into. The cost is
+/// deliberate and has to be paid knowingly — raising the floor takes providers
+/// offline until they upgrade, which is worth it for an exploit and is not
+/// worth it for a rename.
+///
+/// Two things must be true before raising it, and both are practical rather
+/// than ceremonial:
+///
+/// - `providers.protocol_version` records what each peer actually *agreed*, so
+///   the query "who goes dark if I raise this" can be answered first.
+/// - [`MINIMUM_PROTOCOL_VERSION_REASON`] is updated in the same change, because
+///   the refusal an operator reads is the only place the answer reaches them.
 pub const MINIMUM_PROTOCOL_VERSION: u32 = 5;
+
+/// Why the floor is where it is, in the words a refused provider's operator
+/// reads. It travels in the refusal itself: "upgrade required" without a reason
+/// is indistinguishable from an outage, and an operator who cannot tell those
+/// apart retries instead of upgrading.
+///
+/// Kept in the same change as the floor it explains — a stale reason is worse
+/// than none, because it is believed.
+pub const MINIMUM_PROTOCOL_VERSION_REASON: &str =
+    "protocol 4 and below describe the per-provider gateway that topology v2 \
+     removed: an agent speaking one waits for desired state Core no longer \
+     issues, and reports wiring that no longer exists";
 
 /// Wire names are pinned explicitly rather than derived. `rename_all` would
 /// render `K3sKubeVirt` as "k3s-kube-virt", which is not the identifier used
@@ -1998,6 +2033,25 @@ mod protocol_six_tests {
         assert_eq!(PROTOCOL_VERSION, 6);
         assert_eq!(MINIMUM_PROTOCOL_VERSION, 5);
         assert!(MINIMUM_PROTOCOL_VERSION < PROTOCOL_VERSION);
+    }
+
+    /// A withdrawal that cannot say why is an outage as far as the operator on
+    /// the other end can tell, and an operator who reads it as an outage
+    /// retries rather than upgrades. So the reason ships with the floor, and
+    /// this asserts it is a sentence rather than a placeholder somebody meant
+    /// to fill in.
+    #[test]
+    fn the_floor_says_why_it_is_where_it_is() {
+        assert!(
+            MINIMUM_PROTOCOL_VERSION_REASON.len() > 40,
+            "the refusal has to be readable by whoever has to act on it"
+        );
+        assert!(
+            MINIMUM_PROTOCOL_VERSION_REASON
+                .contains(&(MINIMUM_PROTOCOL_VERSION - 1).to_string()),
+            "the reason names the highest withdrawn version, so raising the \
+             floor without updating it fails here rather than in production"
+        );
     }
 }
 
