@@ -47,12 +47,23 @@ use serde::{Deserialize, Serialize};
 /// agent that still sends a gateway status is told so instead of being
 /// silently ignored.
 /// **6, as of the renames in phase 8.** `lifecycle` became `intent` and
-/// `Deleted` became `Absent`: both are the same contract said correctly, and
-/// both change bytes on the wire, which is what a bump is for.
+/// `Deleted` became `Absent`. **Neither changes a byte on the wire**, and the
+/// draft of this comment that said they did was the defect: it reasoned from
+/// `serde(alias)`, which lets a new peer read an old payload and does nothing
+/// in the direction that mattered. Core serializes desired state, so emitting
+/// the new spellings would have broken every agent that had not yet upgraded —
+/// the exact flag day a version range exists to avoid. The names are corrected
+/// in Rust and the wire keeps its own.
+///
+/// So what does 6 actually assert? One thing, and it is a capability rather
+/// than a format: **`ProviderView::version` is a monotonic revision, not a
+/// content fingerprint.** A 5 peer may only compare it for equality — a
+/// fingerprint moves sideways, so "different" is all it can mean. A 6 peer may
+/// additionally compare it for *order*, and rely on a larger number being a
+/// later view. Advertising 6 is how an agent says it understands that.
 ///
 /// Additive fields have not bumped this and should not — `Observation` arrived
-/// at 5 and an older agent simply sends none. A rename is different: an older
-/// peer sends a key the new one does not expect, and only a version can say so.
+/// at 5 and an older agent simply sends none.
 pub const PROTOCOL_VERSION: u32 = 6;
 
 /// The oldest protocol this Core still answers. Protocol 5 agents are accepted
@@ -470,11 +481,24 @@ pub struct InstanceSpec {
     #[serde(default)]
     pub budget_secs: Option<u64>,
     pub id: String,
-    /// **`intent`, not `lifecycle`** — protocol 6. The old name reads as a state
-    /// machine Core is driving; the field is a *target*, and the whole design
-    /// rests on that difference. `serde(alias)` keeps a protocol 5 agent's
-    /// payloads parsing, so the rename costs a version bump and not a flag day.
-    #[serde(alias = "lifecycle")]
+    /// **`intent` in Rust, `lifecycle` on the wire, and that split is the
+    /// point.** The old name reads as a state machine Core is driving; the
+    /// field is a *target*, and the whole design rests on that difference. So
+    /// the name developers read is corrected.
+    ///
+    /// The bytes are not, and the first attempt got this wrong in a way only
+    /// production would have shown. `serde(alias)` lets a *new* peer read an
+    /// *old* payload; it does nothing in the other direction, which is the one
+    /// that matters here — Core serializes desired state and the agent reads
+    /// it. Emitting `intent` would have meant every protocol 5 agent failing on
+    /// a missing `lifecycle` field, so negotiating down to 5 was a promise Core
+    /// could not keep: the handshake succeeded and the next poll did not parse.
+    ///
+    /// A rename is not worth a flag day. The wire keeps `lifecycle`, accepts
+    /// `intent` from anyone who sends it, and every agent old and new works
+    /// unchanged — which is what this repository's own rule already said: add
+    /// the new name, keep the old.
+    #[serde(rename = "lifecycle", alias = "intent")]
     pub intent: Lifecycle,
     pub name: String,
     /// What to build from, and everything about it that changes with the
@@ -767,6 +791,15 @@ pub enum Lifecycle {
     /// machine should not exist* stays true throughout that, and stays true
     /// afterwards. The rename moves the odd one out toward the rule rather than
     /// away from it.
+    ///
+    /// **`deleted` on the wire, and a renamed variant is the worse half of the
+    /// problem.** A renamed *field* an old peer cannot find is at least a clear
+    /// deserialization error; a renamed *value* it has never heard of is the
+    /// same error arriving only for the machines that happen to be reaching
+    /// this state — so a teardown would fail while everything else looked
+    /// healthy. Core emits the value, so only Core's spelling matters, and it
+    /// stays the one every shipped agent already parses.
+    #[serde(rename = "deleted", alias = "absent")]
     Absent,
 }
 
@@ -787,12 +820,12 @@ pub struct InferenceWorkerSpec {
     #[serde(default)]
     pub budget_secs: Option<u64>,
     pub id: String,
-    /// **`intent`, not `lifecycle`** — protocol 6, and renamed here for the same
-    /// reason as on `InstanceSpec`. Missing this one in the first pass would
-    /// have put `intent` on the wire for machines and `lifecycle` for workers,
-    /// which is worse than either name: a reader would reasonably conclude the
-    /// two fields meant different things.
-    #[serde(alias = "lifecycle")]
+    /// **`intent` in Rust, `lifecycle` on the wire** — the same split as on
+    /// `InstanceSpec`, for the same reasons. Missing this one in the first pass
+    /// would have put `intent` on the wire for machines and `lifecycle` for
+    /// workers, which is worse than either name: a reader would reasonably
+    /// conclude the two fields meant different things.
+    #[serde(rename = "lifecycle", alias = "intent")]
     pub intent: Lifecycle,
     pub image: String,
     pub model_repo: String,
@@ -1994,7 +2027,7 @@ mod protocol_six_tests {
     /// And the new name is what Core *writes*, so an upgraded agent sees the
     /// contract the documentation describes.
     #[test]
-    fn the_wire_now_says_intent() {
+    fn the_rename_is_in_rust_and_the_wire_is_unchanged() {
         let spec = InstanceSpec {
             id: "i-1".into(),
             intent: Lifecycle::Absent,
@@ -2002,10 +2035,27 @@ mod protocol_six_tests {
             ..Default::default()
         };
         let json = serde_json::to_string(&spec).expect("serializes");
-        assert!(json.contains("\"intent\""), "{json}");
-        assert!(!json.contains("\"lifecycle\""), "{json}");
-        assert!(json.contains("\"absent\""), "{json}");
-        assert!(!json.contains("\"deleted\""), "{json}");
+
+        // Core serializes desired state and the agent reads it, so what Core
+        // *emits* is the only thing an un-upgraded agent's parser sees. This
+        // test asserted the opposite two versions ago, and that assertion would
+        // have taken every protocol 5 agent down on the deploy that shipped it.
+        assert!(json.contains("\"lifecycle\""), "{json}");
+        assert!(!json.contains("\"intent\""), "{json}");
+        assert!(json.contains("\"deleted\""), "{json}");
+        assert!(!json.contains("\"absent\""), "{json}");
+
+        // And both spellings are read, so a peer that has moved on early is
+        // not punished for it.
+        for key in ["lifecycle", "intent"] {
+            for value in ["deleted", "absent"] {
+                let raw = json
+                    .replace("\"lifecycle\":\"deleted\"", &format!("\"{key}\":\"{value}\""));
+                let back: InstanceSpec = serde_json::from_str(&raw)
+                    .unwrap_or_else(|e| panic!("{key}={value} must parse: {e}"));
+                assert_eq!(back.intent, Lifecycle::Absent);
+            }
+        }
     }
 
     /// **Every value is still a destination**, which is the rule the renames
@@ -2015,15 +2065,22 @@ mod protocol_six_tests {
     #[test]
     fn every_desired_value_is_a_destination() {
         for v in [Lifecycle::Running, Lifecycle::Stopped, Lifecycle::Absent] {
-            let s = serde_json::to_string(&v).unwrap();
-            // A verb would read as an instruction to do something now; these are
-            // all adjectives describing where the machine should end up.
+            // **The variant name, not the wire word.** A verb would read as an
+            // instruction to do something now; these are all adjectives
+            // describing where the machine should end up. This test used to ask
+            // the serialized form, which stopped being the right question once
+            // the wire kept `deleted` for compatibility — and the rule was
+            // always about the vocabulary a developer reads, since the bytes
+            // persuade nobody.
+            let name = format!("{v:?}");
             assert!(
-                !s.contains("start") && !s.contains("stop\"") && !s.contains("delete"),
-                "{s} reads as a command rather than a destination"
+                !name.starts_with("Start") && !name.starts_with("Stop\"") && !name.contains("Delete"),
+                "{name} reads as a command rather than a destination"
             );
         }
-        assert_eq!(serde_json::to_string(&Lifecycle::Absent).unwrap(), "\"absent\"");
+        // Legacy on purpose, and the one value where that is worth a comment:
+        // every shipped agent parses `deleted`, and none has heard of `absent`.
+        assert_eq!(serde_json::to_string(&Lifecycle::Absent).unwrap(), "\"deleted\"");
     }
 
     /// The supported range is stated rather than implied, so dropping an old
