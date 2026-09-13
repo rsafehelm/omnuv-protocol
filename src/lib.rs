@@ -46,7 +46,20 @@ use serde::{Deserialize, Serialize};
 /// quiet erosion — it is a published interface in a public repository, and an
 /// agent that still sends a gateway status is told so instead of being
 /// silently ignored.
-pub const PROTOCOL_VERSION: u32 = 5;
+/// **6, as of the renames in phase 8.** `lifecycle` became `intent` and
+/// `Deleted` became `Absent`: both are the same contract said correctly, and
+/// both change bytes on the wire, which is what a bump is for.
+///
+/// Additive fields have not bumped this and should not — `Observation` arrived
+/// at 5 and an older agent simply sends none. A rename is different: an older
+/// peer sends a key the new one does not expect, and only a version can say so.
+pub const PROTOCOL_VERSION: u32 = 6;
+
+/// The oldest protocol this Core still answers. Protocol 5 agents are accepted
+/// and their `lifecycle` key is read by the alias above, so a provider upgrades
+/// when it chooses rather than when Core does. Removing this is a decision about
+/// abandoning running agents, and should look like one.
+pub const MINIMUM_PROTOCOL_VERSION: u32 = 5;
 
 /// Wire names are pinned explicitly rather than derived. `rename_all` would
 /// render `K3sKubeVirt` as "k3s-kube-virt", which is not the identifier used
@@ -422,7 +435,12 @@ pub struct InstanceSpec {
     #[serde(default)]
     pub budget_secs: Option<u64>,
     pub id: String,
-    pub lifecycle: Lifecycle,
+    /// **`intent`, not `lifecycle`** — protocol 6. The old name reads as a state
+    /// machine Core is driving; the field is a *target*, and the whole design
+    /// rests on that difference. `serde(alias)` keeps a protocol 5 agent's
+    /// payloads parsing, so the rename costs a version bump and not a flag day.
+    #[serde(alias = "lifecycle")]
+    pub intent: Lifecycle,
     pub name: String,
     /// What to build from, and everything about it that changes with the
     /// operating system. The agent maps the id to its own template.
@@ -707,7 +725,14 @@ pub enum Lifecycle {
     /// behaviour for an instruction nobody actually gave.
     #[default]
     Stopped,
-    Deleted,
+    /// **`Absent`, not `Deleted`** — protocol 6. Every value here is a
+    /// destination, and this one was the exception that proved it: `Deleted` is
+    /// a command wearing a state's clothes, and it reads wrong on the thousandth
+    /// identical send while the agent is still tearing the machine down. *This
+    /// machine should not exist* stays true throughout that, and stays true
+    /// afterwards. The rename moves the odd one out toward the rule rather than
+    /// away from it.
+    Absent,
 }
 
 /// How to execute an inference worker. Carries execution detail (image, model
@@ -1263,7 +1288,7 @@ mod tests {
     fn enrolment_is_invisible_to_a_peer_that_predates_it() {
         let with = serde_json::to_string(&InstanceSpec {
             id: "i-1".into(),
-            lifecycle: Lifecycle::Running,
+            intent: Lifecycle::Running,
             name: "gpu-1".into(),
             vcpus: 4,
             memory_mib: 8192,
@@ -1886,14 +1911,86 @@ mod observation_tests {
         assert!(!at(2, 1, 4_000).supersedes(&held));
     }
 
-    /// Additive, so `PROTOCOL_VERSION` holds: a report from an agent that has
-    /// never heard of this field parses, and carries no observation — which the
-    /// rule above turns into "presence only", the behaviour Core had before.
+    /// Additive: a report from an agent that has never heard of this field
+    /// parses and carries no observation — which the rule above turns into
+    /// "presence only", the behaviour Core had before.
+    ///
+    /// **This test once asserted `PROTOCOL_VERSION == 5`** to say that adding
+    /// the field had not bumped it. Phase 8's renames then bumped it for an
+    /// unrelated reason and the assertion became false while the property it
+    /// stood for stayed true — which is the tell of a test written about a
+    /// number rather than about a behaviour. What it means is below: an older
+    /// peer's payload parses, whatever the current version happens to be.
     #[test]
     fn an_older_agents_report_still_parses() {
         let older = r#"{"protocol_version":5,"instances":[],"workers":[]}"#;
         let r: StatusReport = serde_json::from_str(older).expect("older report must parse");
-        assert!(r.observation.is_none());
-        assert_eq!(PROTOCOL_VERSION, 5, "an additive field does not bump the version");
+        assert!(r.observation.is_none(), "an absent observation is absent, not defaulted to complete");
+        assert!(
+            MINIMUM_PROTOCOL_VERSION <= 5,
+            "a protocol 5 agent is still supported, so its reports must still parse"
+        );
+    }
+}
+
+#[cfg(test)]
+mod protocol_six_tests {
+    use super::*;
+
+    /// **A protocol 5 agent's payload still parses.** The rename is a bump
+    /// because the bytes changed, not because older peers are abandoned: an
+    /// agent in the field keeps sending `lifecycle` until somebody upgrades it,
+    /// and Core reading that is what makes the upgrade order *Core first, then
+    /// providers, at their own pace*.
+    #[test]
+    fn a_protocol_five_payload_still_parses() {
+        let old = r#"{"id":"i-1","lifecycle":"running","name":"gpu-1","vcpus":2,
+                      "memory_mib":4096,"disk_gib":20}"#;
+        let spec: InstanceSpec = serde_json::from_str(old).expect("a v5 spec must parse");
+        assert_eq!(spec.intent, Lifecycle::Running);
+    }
+
+    /// And the new name is what Core *writes*, so an upgraded agent sees the
+    /// contract the documentation describes.
+    #[test]
+    fn the_wire_now_says_intent() {
+        let spec = InstanceSpec {
+            id: "i-1".into(),
+            intent: Lifecycle::Absent,
+            name: "gpu-1".into(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&spec).expect("serializes");
+        assert!(json.contains("\"intent\""), "{json}");
+        assert!(!json.contains("\"lifecycle\""), "{json}");
+        assert!(json.contains("\"absent\""), "{json}");
+        assert!(!json.contains("\"deleted\""), "{json}");
+    }
+
+    /// **Every value is still a destination**, which is the rule the renames
+    /// exist to restore. The test worth having is the one that asks the
+    /// question R3 poses: what does this value mean on the thousandth identical
+    /// send? Each of these means the same thing every time.
+    #[test]
+    fn every_desired_value_is_a_destination() {
+        for v in [Lifecycle::Running, Lifecycle::Stopped, Lifecycle::Absent] {
+            let s = serde_json::to_string(&v).unwrap();
+            // A verb would read as an instruction to do something now; these are
+            // all adjectives describing where the machine should end up.
+            assert!(
+                !s.contains("start") && !s.contains("stop\"") && !s.contains("delete"),
+                "{s} reads as a command rather than a destination"
+            );
+        }
+        assert_eq!(serde_json::to_string(&Lifecycle::Absent).unwrap(), "\"absent\"");
+    }
+
+    /// The supported range is stated rather than implied, so dropping an old
+    /// peer is a deliberate edit here rather than an accident somewhere else.
+    #[test]
+    fn the_supported_range_is_explicit() {
+        assert_eq!(PROTOCOL_VERSION, 6);
+        assert_eq!(MINIMUM_PROTOCOL_VERSION, 5);
+        assert!(MINIMUM_PROTOCOL_VERSION < PROTOCOL_VERSION);
     }
 }
