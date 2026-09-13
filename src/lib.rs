@@ -1062,6 +1062,79 @@ pub struct StatusReport {
     /// Core ignores it, and an older agent sends none.
     #[serde(default)]
     pub checks: Vec<SelfCheck>,
+    /// **What this report claims to cover, and whether it covers it.**
+    ///
+    /// Without this a report is a list of things, and a list of things cannot
+    /// say whether it is *all* of them. An empty `instances` is then
+    /// indistinguishable from an agent that failed to enumerate — so Core can
+    /// never safely conclude a machine is gone, which is the one conclusion that
+    /// frees a card and deletes a ledger row.
+    ///
+    /// Additive and defaulted, so `PROTOCOL_VERSION` holds: an older agent sends
+    /// none and Core treats its reports as it always has — evidence of presence,
+    /// never of absence.
+    #[serde(default)]
+    pub observation: Option<Observation>,
+}
+
+/// The provenance of one status report: what was looked at, when, and whether
+/// the looking finished.
+///
+/// This is the wire form of a rule the control plane already holds internally —
+/// *unknown is not empty*. A scan that could not complete reports that it could
+/// not complete, rather than reporting nothing found; evidence from a provider
+/// needs the same property, because the failure mode is identical and the
+/// consequence is worse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Observation {
+    /// Increments once per agent process start. Two reports from different
+    /// generations cannot be ordered against each other by `sequence` alone,
+    /// so a restart is visible rather than looking like a reordering.
+    pub generation: u64,
+    /// Monotonic within a generation. Lets Core drop a report that arrived out
+    /// of order instead of applying it over newer evidence.
+    pub sequence: u64,
+    /// When the agent *looked*, not when Core received it. A report delayed in
+    /// flight is stale evidence, and only this field can say so.
+    pub collected_at_unix: i64,
+    /// Which kinds this report enumerated — `instances`, `workers`. A kind that
+    /// is absent from this list was not looked at, which is different from
+    /// having none.
+    #[serde(default)]
+    pub scope: Vec<String>,
+    /// False when any enumeration failed, was bounded, or was skipped. A report
+    /// that is not complete may prove presence and may never prove absence.
+    pub complete: bool,
+    /// Why, in the agent's own words, when it is not complete.
+    #[serde(default)]
+    pub incomplete_because: Vec<String>,
+    /// The provider desired revision this evidence answers, when the agent knows
+    /// it. Correlates evidence with an input; it does **not** give a provider
+    /// authority over any project's epoch.
+    #[serde(default)]
+    pub desired_revision: Option<u64>,
+}
+
+impl Observation {
+    /// Whether absence may be concluded for a kind from this report.
+    ///
+    /// Three conditions, and dropping any one of them is how a healthy provider
+    /// gets its machines deleted: the report finished, it actually looked at
+    /// this kind, and it is not older than evidence already held.
+    pub fn may_prove_absence(&self, kind: &str) -> bool {
+        self.complete && self.scope.iter().any(|s| s == kind)
+    }
+
+    /// Whether this report supersedes one already held. A report from an earlier
+    /// generation is not older — it is from a different process, and only
+    /// `collected_at_unix` can compare across that boundary.
+    pub fn supersedes(&self, held: &Observation) -> bool {
+        if self.generation == held.generation {
+            self.sequence > held.sequence
+        } else {
+            self.collected_at_unix > held.collected_at_unix
+        }
+    }
 }
 
 /// Frames on the reverse tunnel.
@@ -1756,5 +1829,71 @@ mod additions_of_11_september {
         .unwrap();
         assert_eq!(seen.observed_by.as_deref(), Some("neighbour"));
         assert_ne!(believed.observed_at_unix, seen.observed_at_unix);
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+
+    /// **The property the whole of phase 6 rests on.** An empty list is evidence
+    /// of absence only when the report finished *and* actually looked. Drop
+    /// either condition and a provider whose agent failed to enumerate has its
+    /// machines deleted and its cards resold.
+    #[test]
+    fn absence_needs_a_complete_report_that_looked() {
+        let looked = |complete: bool, scope: &[&str]| Observation {
+            generation: 1,
+            sequence: 1,
+            collected_at_unix: 1_000,
+            scope: scope.iter().map(|s| s.to_string()).collect(),
+            complete,
+            incomplete_because: vec![],
+            desired_revision: None,
+        };
+        assert!(looked(true, &["instances"]).may_prove_absence("instances"));
+        // Finished, but never enumerated this kind.
+        assert!(!looked(true, &["workers"]).may_prove_absence("instances"));
+        // Enumerated it, but did not finish.
+        assert!(!looked(false, &["instances"]).may_prove_absence("instances"));
+        // A report carrying no scope at all proves nothing absent, which is what
+        // an older agent's reports become: presence only, exactly as before.
+        assert!(!looked(true, &[]).may_prove_absence("instances"));
+    }
+
+    /// A restart is not a reordering. Sequence numbers restart with the process,
+    /// so comparing them across generations would make the first report of a new
+    /// agent look older than the last report of the old one — and be discarded.
+    #[test]
+    fn a_restart_is_not_a_reordering() {
+        let at = |generation, sequence, collected_at_unix| Observation {
+            generation,
+            sequence,
+            collected_at_unix,
+            scope: vec!["instances".into()],
+            complete: true,
+            incomplete_because: vec![],
+            desired_revision: None,
+        };
+        let held = at(1, 900, 5_000);
+        // Same process, later sequence: newer.
+        assert!(at(1, 901, 5_060).supersedes(&held));
+        // Same process, earlier sequence: a reordered report, dropped.
+        assert!(!at(1, 899, 5_060).supersedes(&held));
+        // New process starting from sequence 1, but collected later: newer.
+        assert!(at(2, 1, 5_120).supersedes(&held));
+        // New process replaying something genuinely old: still not newer.
+        assert!(!at(2, 1, 4_000).supersedes(&held));
+    }
+
+    /// Additive, so `PROTOCOL_VERSION` holds: a report from an agent that has
+    /// never heard of this field parses, and carries no observation — which the
+    /// rule above turns into "presence only", the behaviour Core had before.
+    #[test]
+    fn an_older_agents_report_still_parses() {
+        let older = r#"{"protocol_version":5,"instances":[],"workers":[]}"#;
+        let r: StatusReport = serde_json::from_str(older).expect("older report must parse");
+        assert!(r.observation.is_none());
+        assert_eq!(PROTOCOL_VERSION, 5, "an additive field does not bump the version");
     }
 }
