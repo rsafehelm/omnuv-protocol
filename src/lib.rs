@@ -752,7 +752,13 @@ pub struct InferenceWorkerSpec {
     #[serde(default)]
     pub budget_secs: Option<u64>,
     pub id: String,
-    pub lifecycle: Lifecycle,
+    /// **`intent`, not `lifecycle`** — protocol 6, and renamed here for the same
+    /// reason as on `InstanceSpec`. Missing this one in the first pass would
+    /// have put `intent` on the wire for machines and `lifecycle` for workers,
+    /// which is worse than either name: a reader would reasonably conclude the
+    /// two fields meant different things.
+    #[serde(alias = "lifecycle")]
+    pub intent: Lifecycle,
     pub image: String,
     pub model_repo: String,
     #[serde(default)]
@@ -1992,5 +1998,33 @@ mod protocol_six_tests {
         assert_eq!(PROTOCOL_VERSION, 6);
         assert_eq!(MINIMUM_PROTOCOL_VERSION, 5);
         assert!(MINIMUM_PROTOCOL_VERSION < PROTOCOL_VERSION);
+    }
+}
+
+#[cfg(test)]
+mod rename_is_complete_tests {
+    /// **Every spec renamed, or none should have been.** The first pass renamed
+    /// `InstanceSpec.lifecycle` and missed `InferenceWorkerSpec.lifecycle`,
+    /// which would have put `intent` on the wire for machines and `lifecycle`
+    /// for workers — worse than either name alone, because a reader would
+    /// reasonably conclude the two fields meant different things.
+    ///
+    /// Checked against the source rather than against a list somebody maintains,
+    /// so a spec added later with the old name fails here.
+    #[test]
+    fn no_spec_still_declares_a_lifecycle_field() {
+        let src = include_str!("lib.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap();
+        let offenders: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("pub lifecycle:"))
+            .collect();
+        assert!(offenders.is_empty(), "still declaring lifecycle: {offenders:?}");
+        assert_eq!(
+            body.matches("pub intent: Lifecycle").count(),
+            2,
+            "both InstanceSpec and InferenceWorkerSpec carry the renamed field"
+        );
     }
 }
