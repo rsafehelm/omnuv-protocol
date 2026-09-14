@@ -1,0 +1,26 @@
+{
+  "protocol_version": 6,
+  "version": 41,
+  "unchanged": false,
+  "inference_workers": [],
+  "instances": [
+    {
+      "id": "55555555-5555-5555-5555-555555555555",
+      "lifecycle": "running",
+      "name": "gpu-2",
+      "image": {
+        "id": "ubuntu-2604",
+        "os_family": "linux",
+        "first_boot": "cloud-init",
+        "default_user": "ubuntu",
+        "auth_mode": "ssh-key"
+      },
+      "vcpus": 4,
+      "memory_mib": 16384,
+      "disk_gib": 100,
+      "ssh_keys": [],
+      "gpu_local_ids": []
+    }
+  ],
+  "images": []
+}

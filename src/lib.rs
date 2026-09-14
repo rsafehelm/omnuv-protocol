@@ -107,6 +107,60 @@ pub const MINIMUM_PROTOCOL_VERSION_REASON: &str =
      removed: an agent speaking one waits for desired state Core no longer \
      issues, and reports wiring that no longer exists";
 
+/// What a peer advertising `offered` and this Core agree on, or why they cannot.
+///
+/// **The rule belongs here rather than in Core**, and until now it did not.
+/// Core carried the only implementation, which meant the one thing a third
+/// party writing a driver most needs to know — *will my handshake be accepted,
+/// and at what version* — could be learned only by trying it against a server
+/// they do not run. A contract whose acceptance rule is private is a contract
+/// with a private half.
+///
+/// The highest version both sides speak wins, so an agent that already speaks
+/// the newest gets it while one a version behind keeps working. Below the floor
+/// is refused rather than translated: see [`MINIMUM_PROTOCOL_VERSION`] for why
+/// a withdrawn version is a cutoff and not a deprecation.
+pub fn negotiate(offered: &[u32]) -> Result<u32, VersionRefusal> {
+    offered
+        .iter()
+        .copied()
+        .filter(|v| (MINIMUM_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(v))
+        .max()
+        .ok_or(VersionRefusal {
+            offered: offered.to_vec(),
+            minimum: MINIMUM_PROTOCOL_VERSION,
+            maximum: PROTOCOL_VERSION,
+            reason: MINIMUM_PROTOCOL_VERSION_REASON,
+        })
+}
+
+/// Why a handshake was refused, in the words its operator reads.
+///
+/// Carries the range rather than only the verdict: "upgrade required" with no
+/// reason is indistinguishable from an outage, and an operator who reads it as
+/// an outage retries instead of upgrading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionRefusal {
+    /// What the peer said it speaks.
+    pub offered: Vec<u32>,
+    pub minimum: u32,
+    pub maximum: u32,
+    /// Why the floor is where it is — [`MINIMUM_PROTOCOL_VERSION_REASON`].
+    pub reason: &'static str,
+}
+
+impl core::fmt::Display for VersionRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "no common protocol version: agent speaks {:?}, core speaks {}..={}. {}",
+            self.offered, self.minimum, self.maximum, self.reason
+        )
+    }
+}
+
+impl std::error::Error for VersionRefusal {}
+
 /// Wire names are pinned explicitly rather than derived. `rename_all` would
 /// render `K3sKubeVirt` as "k3s-kube-virt", which is not the identifier used
 /// everywhere else, and these strings are persisted in `providers.runtime`.
