@@ -161,6 +161,92 @@ impl core::fmt::Display for VersionRefusal {
 
 impl std::error::Error for VersionRefusal {}
 
+/// A string the wire needs in full and a log must never see.
+///
+/// **This is the class, not an instance.** A struct that carries a secret and
+/// derives `Debug` prints that secret wherever anyone writes `{:?}` — a
+/// `tracing` line, an `anyhow` context, a panic message — and every container
+/// it nests in inherits the leak for free. `StreamCredentials` was given a
+/// hand-written `Debug` for exactly that reason, and two more fields of the
+/// same shape turned up immediately afterwards: the signal that the instance
+/// had been fixed and the class had not. A per-struct `Debug` is the fix that
+/// only works where it was applied, which is the fix that will be needed again.
+///
+/// So the type is the check. A field typed this way cannot be printed by
+/// accident, and the next secret is redacted by being declared correctly rather
+/// than by its author remembering that this file exists.
+///
+/// **`Display` redacts too, deliberately.** `{}` in a log is exactly as bad as
+/// `{:?}` and is the easier of the two to write without thinking. The cost is
+/// real and is the point: a caller that genuinely needs the characters asks for
+/// them by name, and the ask is a word a reviewer sees in a diff. It is not
+/// free — `format!("{key}")` compiled before and compiles now, and quietly
+/// yields `<redacted>`, so a caller that wanted the value gets a useless string
+/// instead of a compile error. That failure is visible in the output; the one
+/// it replaces was visible only in a log file somebody else reads.
+///
+/// Nothing is shown at all: no length, no prefix, no first four characters.
+/// A prefix is the helpful-looking variant everyone reaches for and it is a
+/// real attack surface on a short secret — four characters given away are four
+/// an attacker no longer guesses, and a length narrows the search on its own.
+///
+/// **`PartialEq` is `String`'s, and is not constant-time.** Checked against the
+/// call sites rather than assumed: nothing compares one of these as an
+/// authentication decision. Core persists them (`instances.overlay_setup_key`,
+/// `recipe_deployments.stream_password`) and forwards the console password into
+/// the viewer's own session; the agent parses one out of a guest file and
+/// reports it upward. The only `==` any of them meets is a round-trip assertion
+/// in a test, and desired state is compared for change by hashing its
+/// *serialization*, never by `==`. A timing-safe comparison here would protect
+/// nothing and would advertise a guarantee the type does not have. When one of
+/// these is ever *verified* against a presented value, the verifier is where
+/// constant time belongs — and it will not be in this crate, which describes
+/// resource semantics and decides nothing.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+// The wire is unchanged by construction: a newtype declared `transparent` is
+// serialized and deserialized as the string it wraps, so a payload written
+// before this type existed still parses and one written after is byte-identical
+// to it. `PROTOCOL_VERSION` does not move, because nothing on the wire did.
+#[serde(transparent)]
+pub struct Redacted(String);
+
+impl Redacted {
+    /// The secret itself, as it has to cross the wire.
+    ///
+    /// Named to be greppable and to read as what it is at the call site:
+    /// `key.expose()` says a secret is being taken out of its wrapper, which
+    /// `key.as_str()` would not, and which a `Deref` or an `AsRef<str>` would
+    /// hide entirely. That is why neither of those exists here — an invisible
+    /// way out is the same defect one layer down.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl std::fmt::Display for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
+    }
+}
+
+impl From<String> for Redacted {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for Redacted {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
 /// Wire names are pinned explicitly rather than derived. `rename_all` would
 /// render `K3sKubeVirt` as "k3s-kube-virt", which is not the identifier used
 /// everywhere else, and these strings are persisted in `providers.runtime`.
@@ -619,7 +705,12 @@ pub struct InstanceSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverlayEnrolment {
     /// A single-use enrolment credential for this machine.
-    pub setup_key: String,
+    ///
+    /// [`Redacted`], and this is the field that made the type worth having: it
+    /// is reached from `InstanceSpec` and from `DesiredState`, so one
+    /// `{:?}` on a provider's desired state would have printed every
+    /// outstanding enrolment key on that provider in a single log line.
+    pub setup_key: Redacted,
     /// Where the overlay's control plane answers. Reached over the machine's
     /// own internet interface, on the provider's NAT bridge — never over the
     /// provider's LAN, which the host drops.
@@ -806,28 +897,19 @@ impl RecipeProgress {
 /// asking the guest to *run* something would need `VM.GuestAgent.Unrestricted`,
 /// which is arbitrary execution inside a buyer's machine.
 ///
-/// **`Debug` is written by hand, and that is the reason this is a type at all.**
-/// A derived one prints the password; `tracing` prints `Debug`; and this crate
-/// is public, so the next person to log an `InstanceStatus` would ship a
-/// buyer's stream login to a log file without ever opening this one. A secret
-/// that redacts itself is the only kind that stays redacted.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// **`Debug` is derived again, and that is the fix rather than a regression.**
+/// This type used to write its own, because a derived one prints the password,
+/// `tracing` prints `Debug`, and this crate is public. That worked and did not
+/// generalise: two more fields of the same shape were carrying secrets under a
+/// derive, and a hand-written `Debug` per struct only ever protects the struct
+/// somebody remembered. The redaction moved down to [`Redacted`], where the
+/// field's own type enforces it and the derive is safe to take back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamCredentials {
     pub user: String,
-    /// The secret. Redacted in `Debug`, and never anywhere else — it has to
-    /// cross the wire intact to be worth delivering.
-    pub password: String,
-}
-
-impl std::fmt::Debug for StreamCredentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StreamCredentials")
-            .field("user", &self.user)
-            // `format_args!` rather than a `&str`, so this reads as a redaction
-            // rather than as a password somebody chose badly.
-            .field("password", &format_args!("<redacted>"))
-            .finish()
-    }
+    /// The secret. Redacted in `Debug` and in `Display`, and nowhere else — it
+    /// has to cross the wire intact to be worth delivering.
+    pub password: Redacted,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1381,7 +1463,7 @@ pub enum TunnelFrame {
     /// provider -> Core, after `Head`: a one-time secret the viewer needs to
     /// authenticate inside the console protocol (VNC's password). Minted by
     /// the hypervisor for this session only; never stored.
-    ConsoleCredential { id: String, password: String },
+    ConsoleCredential { id: String, password: Redacted },
     /// Core -> provider: desired state changed, reconcile now.
     ///
     /// A nudge, not the payload: the agent then fetches desired state over the
@@ -2335,5 +2417,209 @@ mod stream_credential_tests {
         // breaks this test rather than the delivery, which would fail silently
         // as a login that never works.
         assert!(serde_json::to_string(&creds).unwrap().contains(PASSWORD));
+    }
+}
+
+/// **The class, tested as a class.** [`Redacted`] exists so that a secret
+/// cannot reach a log by accident; what follows proves that it does not, that
+/// the wire never noticed the type change, and that a payload written before
+/// the type existed still parses into it.
+///
+/// Every `Debug` assertion is on the *whole* rendered string rather than on a
+/// `.contains()`. A `.contains()` guarding a leak passes on a render that was
+/// truncated, which is to say it passes for the wrong reason in exactly the
+/// case the test exists to catch.
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    /// Long enough that a prefix leak would be visible, and distinctive enough
+    /// that a substring search cannot match anything else in these payloads.
+    const SECRET: &str = "0E38B183-B8B6-45CE-B93B-2EF63F3D14E4";
+
+    /// Both formatters, and nothing but the marker from either. `{}` reaches
+    /// for a secret as readily as `{:?}` and is the easier one to write without
+    /// thinking, so redacting only `Debug` would leave the more likely half
+    /// open. No length and no prefix: four helpful characters are four an
+    /// attacker no longer has to guess.
+    #[test]
+    fn neither_formatter_shows_anything_at_all() {
+        let r = Redacted::from(SECRET);
+        assert_eq!(format!("{r:?}"), "<redacted>");
+        assert_eq!(format!("{r}"), "<redacted>");
+        // The one door out, and deliberately the only one: no `Deref`, no
+        // `AsRef<str>`, so a call site that takes the secret says so.
+        assert_eq!(r.expose(), SECRET);
+    }
+
+    /// The three fields the sweep called genuine secrets, each rendered whole.
+    /// A field added to one of these later fails here, which is the point: a
+    /// new field beside a credential is exactly when somebody should be made to
+    /// look at `Debug` again.
+    #[test]
+    fn every_secret_bearing_type_renders_without_its_secret() {
+        let enrolment = OverlayEnrolment {
+            setup_key: SECRET.into(),
+            management_url: "https://api.omnuv.com:8443".into(),
+            hostname: Some("onv-gpu-1".into()),
+        };
+        assert_eq!(
+            format!("{enrolment:?}"),
+            r#"OverlayEnrolment { setup_key: <redacted>, management_url: "https://api.omnuv.com:8443", hostname: Some("onv-gpu-1") }"#
+        );
+
+        let creds = StreamCredentials {
+            user: "omnuv".into(),
+            password: SECRET.into(),
+        };
+        assert_eq!(
+            format!("{creds:?}"),
+            r#"StreamCredentials { user: "omnuv", password: <redacted> }"#
+        );
+
+        let frame = TunnelFrame::ConsoleCredential {
+            id: "c-1".into(),
+            password: SECRET.into(),
+        };
+        assert_eq!(
+            format!("{frame:?}"),
+            r#"ConsoleCredential { id: "c-1", password: <redacted> }"#
+        );
+    }
+
+    /// The containers, which are what somebody actually logs. `DesiredState` is
+    /// the one that mattered: a single `{:?}` on it would have printed every
+    /// outstanding enrolment key on that provider in one line.
+    ///
+    /// Not a whole-string literal here, and not out of laziness — these two
+    /// types take additive fields most releases, so a literal would fail
+    /// regularly for a reason that has nothing to do with a leak, and a test
+    /// that cries wolf is one nobody reads. Counting closes the hole the
+    /// whole-string rule exists to close: a truncated render fails the marker
+    /// count, so the secret's absence cannot pass vacuously.
+    #[test]
+    fn a_secret_does_not_escape_through_the_value_that_carries_it() {
+        let spec = InstanceSpec {
+            id: "i-1".into(),
+            overlay: Some(OverlayEnrolment {
+                setup_key: SECRET.into(),
+                management_url: "https://api.omnuv.com:8443".into(),
+                hostname: None,
+            }),
+            ..Default::default()
+        };
+        let state = DesiredState {
+            protocol_version: PROTOCOL_VERSION,
+            version: 7,
+            unchanged: false,
+            inference_workers: vec![],
+            instances: vec![spec.clone(), spec.clone()],
+            images: vec![],
+        };
+
+        let spec_shown = format!("{spec:?}");
+        assert_eq!(
+            spec_shown.matches(SECRET).count(),
+            0,
+            "InstanceSpec prints the key: {spec_shown}"
+        );
+        assert_eq!(
+            spec_shown.matches("<redacted>").count(),
+            1,
+            "InstanceSpec: {spec_shown}"
+        );
+
+        // Two machines, two keys, and the count is what proves neither of them
+        // is the one that got through.
+        let state_shown = format!("{state:?}");
+        assert_eq!(
+            state_shown.matches(SECRET).count(),
+            0,
+            "DesiredState prints a key: {state_shown}"
+        );
+        assert_eq!(
+            state_shown.matches("<redacted>").count(),
+            2,
+            "DesiredState: {state_shown}"
+        );
+    }
+
+    /// **The wire is unchanged, and it is proved against literals** rather than
+    /// against a round trip — a round trip passes just as happily when both
+    /// halves move together, which is the failure this crate has already
+    /// shipped once. A secret is a bare JSON string before and after, so
+    /// `PROTOCOL_VERSION` stays 6: nothing on the wire moved.
+    #[test]
+    fn a_secret_is_still_a_bare_json_string() {
+        // `#[serde(transparent)]` on the newtype, checked rather than assumed:
+        // the value is the string, not an object wrapping one and not an array.
+        assert_eq!(
+            serde_json::to_string(&Redacted::from(SECRET)).unwrap(),
+            format!("\"{SECRET}\"")
+        );
+
+        let enrolment = OverlayEnrolment {
+            setup_key: SECRET.into(),
+            management_url: "https://api.omnuv.com:8443".into(),
+            hostname: Some("onv-gpu-1".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&enrolment).unwrap(),
+            r#"{"setup_key":"0E38B183-B8B6-45CE-B93B-2EF63F3D14E4","management_url":"https://api.omnuv.com:8443","hostname":"onv-gpu-1"}"#
+        );
+
+        assert_eq!(
+            serde_json::to_string(&StreamCredentials {
+                user: "omnuv".into(),
+                password: SECRET.into(),
+            })
+            .unwrap(),
+            r#"{"user":"omnuv","password":"0E38B183-B8B6-45CE-B93B-2EF63F3D14E4"}"#
+        );
+
+        // The enum variant is here because an externally-visible variant is the
+        // easiest serialization to break by accident: the tag, the variant name
+        // and the field all have to survive, and a newtype in one field is
+        // precisely the kind of change that quietly re-shapes one of them.
+        assert_eq!(
+            serde_json::to_string(&TunnelFrame::ConsoleCredential {
+                id: "c-1".into(),
+                password: SECRET.into(),
+            })
+            .unwrap(),
+            r#"{"t":"console_credential","id":"c-1","password":"0E38B183-B8B6-45CE-B93B-2EF63F3D14E4"}"#
+        );
+    }
+
+    /// And the other direction: payloads as they are written today, by a peer
+    /// that has never heard of this type, still parse. This is the half
+    /// `serde(alias)` does not cover and the half that takes providers down
+    /// when it is wrong.
+    #[test]
+    fn todays_payloads_still_deserialize() {
+        let enrolment: OverlayEnrolment = serde_json::from_str(
+            r#"{"setup_key":"0E38B183-B8B6-45CE-B93B-2EF63F3D14E4","management_url":"https://api.omnuv.com:8443"}"#,
+        )
+        .unwrap();
+        assert_eq!(enrolment.setup_key.expose(), SECRET);
+        assert_eq!(enrolment.hostname, None);
+
+        let creds: StreamCredentials = serde_json::from_str(
+            r#"{"user":"omnuv","password":"0E38B183-B8B6-45CE-B93B-2EF63F3D14E4"}"#,
+        )
+        .unwrap();
+        assert_eq!(creds.password.expose(), SECRET);
+
+        let frame: TunnelFrame = serde_json::from_str(
+            r#"{"t":"console_credential","id":"c-1","password":"0E38B183-B8B6-45CE-B93B-2EF63F3D14E4"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            TunnelFrame::ConsoleCredential {
+                id: "c-1".into(),
+                password: SECRET.into()
+            }
+        );
     }
 }
