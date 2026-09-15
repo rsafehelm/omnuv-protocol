@@ -2305,8 +2305,11 @@ mod rename_is_complete_tests {
     /// so a spec added later with the old name fails here.
     #[test]
     fn no_spec_still_declares_a_lifecycle_field() {
-        let src = include_str!("lib.rs");
-        let body = src.split("#[cfg(test)]").next().unwrap();
+        // Was `src.split("#[cfg(test)]").next()`, which stopped at the first
+        // test module and so never reached the production code declared below
+        // it. The shared stripper removes each test module instead of
+        // truncating at one.
+        let body = super::source_scan::production_source();
         let offenders: Vec<&str> = body
             .lines()
             .map(str::trim)
@@ -2621,5 +2624,228 @@ mod redaction_tests {
                 password: SECRET.into()
             }
         );
+    }
+}
+
+/// Reading this crate's own source, with its tests taken back out of it.
+///
+/// Every source-level check needs this and needs the same guard: **the file
+/// being searched contains the searcher**, so a scan that reads `lib.rs` whole
+/// finds its own assertion strings and fails against code that is correct. That
+/// has happened three times in this repository already.
+///
+/// The scope used to be `src.split("#[cfg(test)]").next()` — everything up to
+/// the *first* test module. That is a truncation rather than a filter, and it
+/// quietly stopped scanning two-fifths of the way down the file: `Corroboration`,
+/// `corroborate` and `CORROBORATION_WINDOW_SECS` are production code declared
+/// *after* a test module, and nothing was checking them. Brace matching removes
+/// each test module and keeps what comes after it.
+#[cfg(test)]
+mod source_scan {
+    /// `lib.rs` with every `#[cfg(test)]` module removed.
+    ///
+    /// The brace counting is naive about braces inside string literals, and that
+    /// is a decision rather than an oversight: it only ever runs over lines
+    /// *inside* a test module, where an unbalanced brace in a literal would end
+    /// the skip early and leak test text into the result. Which is precisely what
+    /// the sentinels below detect — so the property is measured on the real file
+    /// rather than argued from the parser.
+    pub(super) fn production_source() -> String {
+        let mut kept = String::new();
+        let mut skipping: Option<i32> = None;
+        let mut after_attribute = false;
+
+        for line in include_str!("lib.rs").lines() {
+            if let Some(depth) = skipping.as_mut() {
+                *depth += braces(line);
+                if *depth <= 0 {
+                    skipping = None;
+                }
+                continue;
+            }
+            if line.trim() == "#[cfg(test)]" {
+                after_attribute = true;
+                continue;
+            }
+            if after_attribute {
+                // The item the attribute applied to. A `#[cfg(test)]` on
+                // something that opens no block — a `use`, a single item — drops
+                // that one line and nothing else.
+                after_attribute = false;
+                let opened = braces(line);
+                if opened > 0 {
+                    skipping = Some(opened);
+                }
+                continue;
+            }
+            kept.push_str(line);
+            kept.push('\n');
+        }
+        kept
+    }
+
+    fn braces(line: &str) -> i32 {
+        line.matches('{').count() as i32 - line.matches('}').count() as i32
+    }
+
+    /// **The observer, proved before anything is trusted to it.** A stripper that
+    /// returned an empty string would let every scan built on it report a clean
+    /// pass over nothing, and a clean pass over nothing is the failure that looks
+    /// most like success.
+    #[test]
+    fn the_stripper_keeps_production_and_drops_tests() {
+        let body = production_source();
+
+        // `Corroboration` is declared *after* a test module. It is in this list
+        // as the regression test for the old truncating scope, not as decoration.
+        for marker in ["pub struct DesiredState", "pub enum Corroboration", "pub fn corroborate"] {
+            assert!(body.contains(marker), "production code was stripped away: {marker}");
+        }
+        for marker in ["JustChecks", "neither_formatter_shows_anything_at_all", "0E38B183"] {
+            assert!(!body.contains(marker), "test code survived the strip: {marker}");
+        }
+    }
+}
+
+/// **The class, held closed by something that runs.**
+///
+/// `StreamCredentials` was given a hand-written `Debug` because its password
+/// printed in full through the derived one. Two more fields with the same shape
+/// turned up within the hour — which is the tell that an instance was fixed and
+/// the class was left open. `Redacted` closes it by declaration, but only for a
+/// field somebody remembered to declare that way, and nobody remembers on the
+/// release where it matters.
+///
+/// So this holds every field whose *name* says it carries a secret to being typed
+/// `Redacted`. A new `pub password: String` fails at `cargo test`, rather than in
+/// a `{:?}` on a provider's desired state months later.
+///
+/// What it cannot do is recognise a secret that is not named like one. A field
+/// called `blob` holding an enrolment key passes this check, and only a person
+/// reading the diff catches it. The vocabulary is a net with a known mesh size,
+/// not a proof — said plainly, because a control whose limits are unwritten gets
+/// believed past them.
+#[cfg(test)]
+mod secret_vocabulary_tests {
+    use super::source_scan::production_source;
+
+    /// A name says "secret" when any underscore-separated part of it is one of
+    /// these, singular or plural.
+    const VOCABULARY: &[&str] =
+        &["secret", "password", "passwd", "token", "key", "credential", "ticket", "auth"];
+
+    /// Names that read as secrets and are not, each with the reason it is let
+    /// through. **The reason is the load-bearing half.** A bare list is a list
+    /// somebody appends to without looking, which is how a detector stops
+    /// detecting; being made to write a sentence is the entire cost of this
+    /// control, and the only thing between it and decoration.
+    const NOT_A_SECRET: &[(&str, &str)] = &[
+        ("ssh_keys", "public keys by contract — a private key is never accepted here"),
+        ("console_password_hash", "a crypt(3) verifier, not the plaintext it verifies"),
+        ("reboot_token", "an idempotency nonce, so one reboot is applied once. It authenticates nothing"),
+        ("rebooted_token", "the agent's echo of that nonce, for the same reason"),
+        ("prompt_tokens_total", "a count of model tokens: the collision is with billing vocabulary, not with credentials"),
+        ("generation_tokens_total", "the same count, the other direction"),
+        ("stream_credentials", "the container. Its own `password` field is scanned on its own line, which is where the secret actually is"),
+        ("auth_mode", "an enum saying key-or-password, and neither of them"),
+    ];
+
+    /// Every `name: type` pair in the body — field declarations and struct
+    /// literal initializers alike.
+    ///
+    /// Not told apart, on purpose. Telling them apart means tracking whether the
+    /// walk is inside a struct body, and all it would buy today is excusing one
+    /// line of a `Default` impl. An initializer reading `setup_key: some_local`
+    /// failing the check is the direction a detector should fail in when it gates
+    /// nothing destructive.
+    fn fields(body: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for line in body.lines() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            // Splitting on `{` as well as `,` opens an inline enum variant into
+            // its fields. `ConsoleCredential { id: String, password: Redacted }`
+            // is where the console password lives, and a variant field carries no
+            // `pub` — so a scan anchored on `pub` walks straight past a secret
+            // that is already on the wire.
+            for piece in line.replace('{', ",").split(',') {
+                let piece = piece.trim();
+                let piece = piece.strip_prefix("pub ").unwrap_or(piece).trim();
+                let Some((name, ty)) = piece.split_once(':') else { continue };
+                let (name, ty) = (name.trim(), ty.trim());
+                // A Rust field name and nothing else: this is what keeps a JSON
+                // key in a string literal (`"setup_key":`) and a path segment
+                // (`AuthMode::SshKey`) out of the results.
+                if name.is_empty()
+                    || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                {
+                    continue;
+                }
+                out.push((name.to_owned(), ty.to_owned()));
+            }
+        }
+        out
+    }
+
+    fn says_secret(name: &str) -> bool {
+        name.split('_').any(|part| {
+            let singular = part.strip_suffix('s').unwrap_or(part);
+            VOCABULARY.contains(&part) || VOCABULARY.contains(&singular)
+        })
+    }
+
+    #[test]
+    fn every_field_whose_name_says_secret_is_typed_redacted() {
+        let body = production_source();
+        let (mut offenders, mut protected, mut excused) = (Vec::new(), Vec::new(), Vec::new());
+
+        for (name, ty) in fields(&body) {
+            if !says_secret(&name) {
+                continue;
+            }
+            if NOT_A_SECRET.iter().any(|(excuse, _)| *excuse == name) {
+                excused.push(name);
+            } else if ty.contains("Redacted") {
+                protected.push(name);
+            } else {
+                offenders.push(format!("{name}: {ty}"));
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "a field named like a secret is not typed `Redacted`, so it prints in \
+             full through any `{{:?}}` on the value that carries it: {offenders:?}. \
+             Either declare it `Redacted` — the wire does not move, the newtype is \
+             `serde(transparent)` — or add it to NOT_A_SECRET with the reason it \
+             is not one."
+        );
+
+        // Non-vacuity, in both directions. A scan that found nothing would pass
+        // this test while asserting nothing at all, which is the shape every
+        // check in this file exists to avoid.
+        assert!(
+            protected.iter().any(|n| n == "setup_key") && protected.iter().any(|n| n == "password"),
+            "the three known secrets are no longer being found by the scan, so a \
+             pass here means the scan is broken rather than the crate is clean: \
+             found {protected:?}"
+        );
+        assert!(
+            fields(&body).len() > 100,
+            "the scan read {} fields out of a 1,500-line crate — it is not reading \
+             the source it thinks it is",
+            fields(&body).len()
+        );
+
+        // An excuse nobody can point at any more is an excuse nobody reviews.
+        for (name, why) in NOT_A_SECRET {
+            assert!(
+                excused.iter().any(|e| e == name),
+                "NOT_A_SECRET still excuses `{name}` ({why}) and no such field \
+                 exists — delete the entry rather than leaving the list describing \
+                 a crate that has moved on"
+            );
+        }
     }
 }
