@@ -773,6 +773,17 @@ pub struct RecipeProgress {
     /// here — a person debugging this needs the original.
     #[serde(default)]
     pub detail: Option<String>,
+    /// The machine's own stream login, once it has minted one.
+    ///
+    /// **Additive and defaulted, so `PROTOCOL_VERSION` does not move.** An
+    /// agent that has never heard of this field sends no such key, and Core
+    /// reads that absence as *not delivered* — never as empty credentials.
+    /// That is the same distinction `NodeInventory.committed` draws between
+    /// unmeasured and zero, and it matters for the same reason: a blank user
+    /// and password would be a login nobody can use, reported as one that
+    /// works.
+    #[serde(default)]
+    pub stream_credentials: Option<StreamCredentials>,
 }
 
 impl RecipeProgress {
@@ -782,6 +793,40 @@ impl RecipeProgress {
 
     pub fn failed(&self) -> bool {
         self.status == "error"
+    }
+}
+
+/// A stream's login, as the machine that minted it hands it up.
+///
+/// The guest generates its own: a password the marketplace chose is a password
+/// the marketplace stored, and a machine the buyer owns is the only thing that
+/// needs to know this one. So it is reported rather than issued, and it travels
+/// on the channel the recipe's install progress already uses — one known file,
+/// read with `VM.GuestAgent.FileRead`. Nothing wider is asked for, because
+/// asking the guest to *run* something would need `VM.GuestAgent.Unrestricted`,
+/// which is arbitrary execution inside a buyer's machine.
+///
+/// **`Debug` is written by hand, and that is the reason this is a type at all.**
+/// A derived one prints the password; `tracing` prints `Debug`; and this crate
+/// is public, so the next person to log an `InstanceStatus` would ship a
+/// buyer's stream login to a log file without ever opening this one. A secret
+/// that redacts itself is the only kind that stays redacted.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamCredentials {
+    pub user: String,
+    /// The secret. Redacted in `Debug`, and never anywhere else — it has to
+    /// cross the wire intact to be worth delivering.
+    pub password: String,
+}
+
+impl std::fmt::Debug for StreamCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamCredentials")
+            .field("user", &self.user)
+            // `format_args!` rather than a `&str`, so this reads as a redaction
+            // rather than as a password somebody chose badly.
+            .field("password", &format_args!("<redacted>"))
+            .finish()
     }
 }
 
@@ -2191,5 +2236,104 @@ mod rename_is_complete_tests {
             2,
             "both InstanceSpec and InferenceWorkerSpec carry the renamed field"
         );
+    }
+}
+
+/// A secret joins the status report, and it rides the channel the recipe's own
+/// outcome already travels. Two things need proving: that an agent which never
+/// heard of it is not misread as having delivered nothing usable, and that the
+/// secret does not escape through `Debug`. The second is the one that will
+/// actually catch a regression.
+#[cfg(test)]
+mod stream_credential_tests {
+    use super::*;
+
+    fn status_reporting(p: RecipeProgress) -> InstanceStatus {
+        InstanceStatus {
+            retryable: None,
+            waiting_on: None,
+            id: "i1".into(),
+            state: InstanceState::Running,
+            rebooted_token: None,
+            local_id: Some("101".into()),
+            private_ip: Some("10.200.99.5".into()),
+            adapters: vec![],
+            diagnostics: None,
+            message: None,
+            recipe_progress: Some(p),
+        }
+    }
+
+    /// The direction that bites, and the same shape as `committed` above: an
+    /// agent that has never heard of the field sends nothing, and nothing must
+    /// read as *not delivered*. Empty credentials are a login that cannot work,
+    /// reported as one that can — so `None` is the only honest parse.
+    #[test]
+    fn an_older_agent_sends_no_credentials_and_absence_is_not_empty() {
+        let from_an_old_agent = r#"{"status":"done","step":"3/6"}"#;
+        let p: RecipeProgress = serde_json::from_str(from_an_old_agent).unwrap();
+        assert!(
+            p.stream_credentials.is_none(),
+            "undelivered credentials must be None, never Some with empty strings"
+        );
+        // And the rest of the report is unchanged, which is what additive means.
+        assert!(p.finished());
+        assert_eq!(p.step.as_deref(), Some("3/6"));
+    }
+
+    /// An upgraded agent's report survives the trip — inside the status it
+    /// rides on rather than on its own, because that is where it will be.
+    #[test]
+    fn a_newer_report_round_trips() {
+        let sent = status_reporting(RecipeProgress {
+            status: "done".into(),
+            step: None,
+            detail: None,
+            stream_credentials: Some(StreamCredentials {
+                user: "omnuv".into(),
+                password: "correct-horse-battery-staple".into(),
+            }),
+        });
+        let back: InstanceStatus =
+            serde_json::from_str(&serde_json::to_string(&sent).unwrap()).unwrap();
+        assert_eq!(back, sent);
+    }
+
+    /// **The test that earns its keep.** A derived `Debug` prints the password,
+    /// `tracing` prints `Debug`, and this repository is public. The whole
+    /// `InstanceStatus` is checked as well as the leaf, because the wrapper is
+    /// what somebody will actually log: redacting a field is worth nothing if
+    /// it does not survive being nested in the value that carries it.
+    #[test]
+    fn the_password_never_reaches_a_debug_line() {
+        const PASSWORD: &str = "correct-horse-battery-staple";
+        let creds = StreamCredentials {
+            user: "omnuv".into(),
+            password: PASSWORD.into(),
+        };
+
+        let shown = format!("{creds:?}");
+        assert!(!shown.contains(PASSWORD), "the password is in Debug output: {shown}");
+        // The whole line, not a substring of it. A field added to this type
+        // later fails here, which is the point: a new field on a credential is
+        // exactly when somebody should be made to look at `Debug` again.
+        assert_eq!(shown, r#"StreamCredentials { user: "omnuv", password: <redacted> }"#);
+
+        let nested = format!(
+            "{:?}",
+            status_reporting(RecipeProgress {
+                status: "done".into(),
+                step: None,
+                detail: None,
+                stream_credentials: Some(creds.clone()),
+            })
+        );
+        assert!(!nested.contains(PASSWORD), "the password escapes through the status: {nested}");
+
+        // And serialization is deliberately *not* redacted. Stated here so that
+        // anyone tempted to "finish the job" by redacting `Serialize` too
+        // breaks this test rather than the delivery, which would fail silently
+        // as a login that never works.
+        assert!(serde_json::to_string(&creds).unwrap().contains(PASSWORD));
     }
 }
