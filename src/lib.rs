@@ -940,6 +940,14 @@ pub struct InstanceStatus {
     pub rebooted_token: Option<String>,
     #[serde(default)]
     pub local_id: Option<String>,
+    /// The provider node the machine runs on, named as the provider's inventory
+    /// names it. Lets Core subtract its own guests from the node they are on:
+    /// without it a host full of marketplace machines still looks big enough
+    /// to take another, and only the provider-wide sum stops an oversell
+    /// (CORE-42 in omnuv's diagrams). Additive: an older agent sends none, and
+    /// none means "not reported", never "on no node".
+    #[serde(default)]
+    pub node: Option<String>,
     #[serde(default)]
     pub private_ip: Option<String>,
     /// Every adapter this machine has, and whether the host has actually seen
@@ -2054,6 +2062,7 @@ mod additions_of_11_september {
             state: InstanceState::Running,
             rebooted_token: None,
             local_id: Some("101".into()),
+            node: None,
             private_ip: Some("10.200.99.5".into()),
             adapters: vec![AdapterStatus {
                 name: "net1".into(),
@@ -2354,6 +2363,7 @@ mod stream_credential_tests {
             state: InstanceState::Running,
             rebooted_token: None,
             local_id: Some("101".into()),
+            node: None,
             private_ip: Some("10.200.99.5".into()),
             adapters: vec![],
             diagnostics: None,
