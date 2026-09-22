@@ -2181,10 +2181,12 @@ mod observation_tests {
         let older = r#"{"protocol_version":5,"instances":[],"workers":[]}"#;
         let r: StatusReport = serde_json::from_str(older).expect("older report must parse");
         assert!(r.observation.is_none(), "an absent observation is absent, not defaulted to complete");
-        assert!(
-            MINIMUM_PROTOCOL_VERSION <= 5,
-            "a protocol 5 agent is still supported, so its reports must still parse"
-        );
+        const {
+            assert!(
+                MINIMUM_PROTOCOL_VERSION <= 5,
+                "a protocol 5 agent is still supported, so its reports must still parse"
+            )
+        };
     }
 }
 
@@ -2270,7 +2272,7 @@ mod protocol_six_tests {
     fn the_supported_range_is_explicit() {
         assert_eq!(PROTOCOL_VERSION, 6);
         assert_eq!(MINIMUM_PROTOCOL_VERSION, 5);
-        assert!(MINIMUM_PROTOCOL_VERSION < PROTOCOL_VERSION);
+        const { assert!(MINIMUM_PROTOCOL_VERSION < PROTOCOL_VERSION) };
     }
 
     /// A withdrawal that cannot say why is an outage as far as the operator on

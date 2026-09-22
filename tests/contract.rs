@@ -213,10 +213,14 @@ fn a_version_below_the_floor_is_refused_with_its_reason() {
 /// outage.
 #[test]
 fn the_supported_range_is_coherent() {
-    assert!(
-        MINIMUM_PROTOCOL_VERSION <= PROTOCOL_VERSION,
-        "the floor has been raised above the ceiling: every peer is refused"
-    );
+    // A `const` block, so an inverted range fails the build, not only this
+    // test; clippy rejects a runtime assertion on constants for that reason.
+    const {
+        assert!(
+            MINIMUM_PROTOCOL_VERSION <= PROTOCOL_VERSION,
+            "the floor has been raised above the ceiling: every peer is refused"
+        )
+    };
     assert!(
         !MINIMUM_PROTOCOL_VERSION_REASON.is_empty(),
         "a floor with no stated reason is a refusal an operator cannot act on"
