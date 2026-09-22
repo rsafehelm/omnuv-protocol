@@ -658,6 +658,14 @@ pub struct InstanceSpec {
     pub console_password_hash: Option<String>,
     #[serde(default)]
     pub gpu_local_ids: Vec<String>,
+    /// The provider node that holds the cards in `gpu_local_ids`, as the
+    /// provider named it in its inventory. A PCI address is unique only per
+    /// node, and identical hosts share them, so without this an agent could
+    /// place on another node whose same slot is free and use a card Core never
+    /// sold. `None` when there are no cards, or from a Core that predates it;
+    /// an agent that receives `Some` places there or refuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_node: Option<String>,
     /// Set when a reboot has been requested and not yet performed. Carries the
     /// request's identity so the agent can report which one it satisfied and
     /// the same reboot is never applied twice.
@@ -1018,6 +1026,9 @@ pub struct InferenceWorkerSpec {
     /// Opaque provider-local GPU identities this worker must use.
     #[serde(default)]
     pub gpu_local_ids: Vec<String>,
+    /// The node holding those cards; see `InstanceSpec::gpu_node`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_node: Option<String>,
     /// Port the worker serves its OpenAI-compatible API on.
     pub port: u16,
 }

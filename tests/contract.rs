@@ -248,3 +248,28 @@ fn golden() -> Vec<(String, String)> {
     );
     out
 }
+
+/// The node a machine's cards are on (v0.18.0, 22 September 2026). A payload
+/// from a Core that predates it reads as no node; one that names it keeps it;
+/// and a machine with no cards sends no key, so a released agent's payload is
+/// byte-for-byte what it was.
+#[test]
+fn the_gpu_node_is_additive_in_both_directions() {
+    for (name, body) in golden() {
+        let state: DesiredState = serde_json::from_str(&body).expect("a released payload");
+        assert_eq!(state.instances[0].gpu_node, None, "{name} predates the node and must read as none");
+    }
+
+    let with = InstanceSpec {
+        gpu_local_ids: vec!["0000:01:00.0".into()],
+        gpu_node: Some("nuc2".into()),
+        ..Default::default()
+    };
+    let raw = serde_json::to_value(&with).expect("serialize");
+    assert_eq!(raw["gpu_node"], "nuc2");
+    let back: InstanceSpec = serde_json::from_value(raw).expect("round trip");
+    assert_eq!(back.gpu_node.as_deref(), Some("nuc2"));
+
+    let without = serde_json::to_value(InstanceSpec::default()).expect("serialize");
+    assert!(without.get("gpu_node").is_none(), "a machine with no cards sends a new key");
+}
