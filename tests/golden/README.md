@@ -11,7 +11,7 @@ the same change — the floor moving is what makes it stop being a promise.
 
 | file | tag | protocol |
 |---|---|---|
-| `desired-state-protocol-5.json` | `v0.12.0` | 5 |
+| `desired-state-protocol-5.json` | `v0.12.0` (same `DesiredState` as `v0.11.0`, the last tag a protocol-5 agent pinned, omnuv-provider 83646ed) | 5 |
 | `desired-state-protocol-6.json` | `v0.13.2` | 6 |
 
 Each was read out of `git show <tag>:src/lib.rs` and hand-written, keys included

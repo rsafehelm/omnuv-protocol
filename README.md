@@ -18,8 +18,12 @@ recover state after a restart, and never parses or branches on their contents.
 
 ```toml
 [dependencies]
-omnuv-protocol = { git = "https://github.com/rsafehelm/omnuv-protocol", tag = "v0.1.0" }
+omnuv-protocol = { git = "https://github.com/rsafehelm/omnuv-protocol", tag = "v0.21.0" }
 ```
+
+The **tag** is the release a consumer pins (`v0.21.0` today); the crate's own
+`version` in Cargo.toml moves separately and more slowly (`0.1.16` at
+`v0.21.0`). Pin the tag. `PROTOCOL_VERSION` is a third number, the wire's.
 
 ## Versioning
 

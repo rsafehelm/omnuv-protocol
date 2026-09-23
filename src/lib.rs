@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any breaking change to the message shapes below.
-/// **5 as of topology v2's completion (12 September 2026).**
+/// **6 now; 5 was topology v2's completion (12 September 2026).**
 ///
 /// Breaking twice, in two steps, and deliberately so.
 ///
@@ -67,7 +67,8 @@ use serde::{Deserialize, Serialize};
 pub const PROTOCOL_VERSION: u32 = 6;
 
 /// The oldest protocol this Core still answers. Protocol 5 agents are accepted
-/// and their `lifecycle` key is read by the alias above, so a provider upgrades
+/// and their `lifecycle` key is the wire name itself (`intent` is the alias,
+/// accepted in the other direction), so a provider upgrades
 /// when it chooses rather than when Core does. Removing this is a decision about
 /// abandoning running agents, and should look like one.
 ///
@@ -511,7 +512,9 @@ impl InventoryReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesiredState {
     pub protocol_version: u32,
-    /// A fingerprint of everything below. An agent that already holds this
+    /// A monotonic revision of everything below (since protocol 6; it was a
+    /// content fingerprint before, which a 5 peer may still only compare for
+    /// equality). An agent that already holds this
     /// version can say so when it asks, and Core answers with `unchanged`
     /// instead of the whole picture — Core's cost should grow with what is
     /// happening, not with how many machines exist.
@@ -1419,9 +1422,11 @@ pub struct Observation {
     /// When the agent *looked*, not when Core received it. A report delayed in
     /// flight is stale evidence, and only this field can say so.
     pub collected_at_unix: i64,
-    /// Which kinds this report enumerated — `instances`, `workers`. A kind that
-    /// is absent from this list was not looked at, which is different from
-    /// having none.
+    /// Which kinds this report enumerated: `desired_instances` and
+    /// `desired_workers`, the words the agent sends and Core's SQL matches (it
+    /// said `instances`, `workers`, which nobody sends). A kind that is absent
+    /// from this list was not looked at, which is different from having none.
+    /// An untyped string today; a typed kind would be a wire change.
     #[serde(default)]
     pub scope: Vec<String>,
     /// False when any enumeration failed, was bounded, or was skipped. A report
