@@ -1815,8 +1815,12 @@ mod workload_tests {
             (WorkloadHealth::Degraded, WorkloadHealth::Down),
             (WorkloadHealth::Starting, WorkloadHealth::Down),
         ] {
-            assert_ne!(a, b);
-            assert_ne!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap());
+            // The wire words, which a rename could make collide; the variants
+            // themselves are distinct by construction.
+            let (wa, wb) = (serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap());
+            assert_ne!(wa, wb);
+            assert_eq!(serde_json::from_str::<WorkloadHealth>(&wa).unwrap(), a);
+            assert_eq!(serde_json::from_str::<WorkloadHealth>(&wb).unwrap(), b);
         }
     }
 }
@@ -1846,20 +1850,32 @@ mod selfcheck_tests {
         };
         // The exact state we were in. Both are true at once, and only reporting
         // the first is how it stayed invisible.
-        assert_eq!(exists.result, CheckResult::Pass);
-        assert_eq!(reaches.result, CheckResult::Fail);
-        assert_ne!(exists.kind, reaches.kind);
+        // What travels, rather than the values just written above: both come
+        // back as sent, and their kinds are different words on the wire.
+        for c in [&exists, &reaches] {
+            let back: SelfCheck = serde_json::from_str(&serde_json::to_string(c).unwrap()).unwrap();
+            assert_eq!(&back, c);
+        }
+        let kind = |c: &SelfCheck| serde_json::to_value(c).unwrap()["kind"].clone();
+        assert_ne!(kind(&exists), kind(&reaches), "presence and connectivity travel as one kind");
     }
 
     /// Unknown is not a pass and not a failure. A machine still booting has not
     /// failed its checks, and reporting either extreme is a lie.
     #[test]
     fn unknown_is_its_own_answer() {
-        for r in [CheckResult::Pass, CheckResult::Fail] {
-            assert_ne!(r, CheckResult::Unknown);
+        // On the wire, where two results could collide: three distinct words,
+        // and each comes back as itself. Comparing the variants in Rust, as
+        // this did, cannot fail.
+        let words: Vec<String> = [CheckResult::Pass, CheckResult::Fail, CheckResult::Unknown]
+            .iter()
+            .map(|r| serde_json::to_string(r).unwrap())
+            .collect();
+        assert_eq!(words[2], "\"unknown\"");
+        assert!(words[0] != words[2] && words[1] != words[2] && words[0] != words[1], "{words:?}");
+        for (r, w) in [CheckResult::Pass, CheckResult::Fail, CheckResult::Unknown].iter().zip(&words) {
+            assert_eq!(&serde_json::from_str::<CheckResult>(w).unwrap(), r);
         }
-        let json = serde_json::to_string(&CheckResult::Unknown).unwrap();
-        assert_eq!(json, "\"unknown\"");
     }
 
     #[test]
@@ -1879,17 +1895,12 @@ mod selfcheck_tests {
     /// newer Core must read it rather than reject it.
     #[test]
     fn a_status_report_without_checks_still_parses() {
-        let v: serde_json::Value =
-            serde_json::from_str(r#"{"checks":[]}"#).unwrap();
-        assert!(v.get("checks").unwrap().as_array().unwrap().is_empty());
-        // And the field defaults when entirely absent.
-        #[derive(serde::Deserialize)]
-        struct JustChecks {
-            #[serde(default)]
-            checks: Vec<SelfCheck>,
-        }
-        let none: JustChecks = serde_json::from_str("{}").unwrap();
-        assert!(none.checks.is_empty());
+        // A real StatusReport, as an agent from before `checks` sends it. It
+        // parsed a Value and a struct of its own, so removing `#[serde(default)]`
+        // from StatusReport.checks would not have failed it.
+        let report: StatusReport =
+            serde_json::from_str(r#"{"protocol_version": 6, "instances": []}"#).unwrap();
+        assert!(report.checks.is_empty());
     }
 }
 
@@ -1939,15 +1950,17 @@ pub fn corroborate(
         return Corroboration::Unknown;
     };
     // The machine has not spoken since the probe, so its silence says nothing.
-    if reported_at + CORROBORATION_WINDOW_SECS < probe.at_unix {
+    // Saturating throughout: these are provider-supplied numbers, and one near
+    // u64::MAX panicked a debug build and wrapped a release one.
+    if reported_at.saturating_add(CORROBORATION_WINDOW_SECS) < probe.at_unix {
         return Corroboration::Unknown;
     }
 
     let source = probe.source.as_deref();
     let saw_this_prober = observed.iter().any(|o| {
         source.is_some_and(|s| o.peer == s)
-            && o.at_unix + CORROBORATION_WINDOW_SECS >= probe.at_unix
-            && probe.at_unix + CORROBORATION_WINDOW_SECS >= o.at_unix
+            && o.at_unix.saturating_add(CORROBORATION_WINDOW_SECS) >= probe.at_unix
+            && probe.at_unix.saturating_add(CORROBORATION_WINDOW_SECS) >= o.at_unix
     });
 
     match (probe.outcome, saw_this_prober) {
@@ -1980,6 +1993,19 @@ mod handshake_tests {
 
     fn seen(peer: &str, at: u64) -> ObservedPeer {
         ObservedPeer { peer: peer.into(), port: 8080, at_unix: at }
+    }
+
+    /// Provider-supplied times near the end of u64 answer, rather than
+    /// panicking a debug build or wrapping a release one.
+    #[test]
+    fn a_time_at_the_end_of_the_range_does_not_overflow() {
+        let far = u64::MAX - 1;
+        assert_eq!(
+            corroborate(&probe(ProbeOutcome::Connected, 1000), &[seen("100.93.27.247", far)], Some(far)),
+            Corroboration::Impostor
+        );
+        assert_eq!(corroborate(&probe(ProbeOutcome::Connected, far), &[seen("100.93.27.247", far)], Some(far)),
+                   Corroboration::Confirmed);
     }
 
     #[test]
@@ -2300,8 +2326,12 @@ mod protocol_six_tests {
             // always about the vocabulary a developer reads, since the bytes
             // persuade nobody.
             let name = format!("{v:?}");
+            // Whole names: `Stopped` is a place, `Stop` an order. The clause
+            // this replaced, `starts_with("Stop\"")`, could never match a
+            // Debug name and so never ran.
             assert!(
-                !name.starts_with("Start") && !name.starts_with("Stop\"") && !name.contains("Delete"),
+                !["Start", "Stop", "Restart", "Reboot", "Delete", "Destroy", "Create"].contains(&name.as_str())
+                    && !name.starts_with("Delete"),
                 "{name} reads as a command rather than a destination"
             );
         }
