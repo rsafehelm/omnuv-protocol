@@ -665,6 +665,14 @@ pub struct InstanceSpec {
     /// diagrams). Additive: an older Core sends none, which is 0.
     #[serde(default)]
     pub console_password_generation: u32,
+    /// Core has seen this machine exist: a runtime id was reported for it.
+    /// An agent that then finds no machine does **not** build one again — a
+    /// clone from the image would put a blank disk where the buyer's was —
+    /// and reports it lost instead, so the buyer decides (omnuv, 23 September
+    /// 2026). Additive: an older Core sends none, which is `false`, and the
+    /// agent then builds as it always did.
+    #[serde(default)]
+    pub built: bool,
     #[serde(default)]
     pub gpu_local_ids: Vec<String>,
     /// The provider node that holds the cards in `gpu_local_ids`, as the
