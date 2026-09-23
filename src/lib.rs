@@ -656,6 +656,15 @@ pub struct InstanceSpec {
     /// response the buyer saw once. `None` on images that manage their own.
     #[serde(default)]
     pub console_password_hash: Option<String>,
+    /// Which console password `console_password_hash` is: 0 is the one set at
+    /// first boot, and each reset by the buyer adds one. A destination, not a
+    /// command (R3): the agent sets the hash on a running machine through its
+    /// guest agent when this is above the generation it last applied, so the
+    /// thousandth identical send changes nothing. The plaintext of a reset
+    /// exists only in the response the buyer saw once (BUYER-18 in omnuv's
+    /// diagrams). Additive: an older Core sends none, which is 0.
+    #[serde(default)]
+    pub console_password_generation: u32,
     #[serde(default)]
     pub gpu_local_ids: Vec<String>,
     /// The provider node that holds the cards in `gpu_local_ids`, as the
@@ -948,6 +957,12 @@ pub struct InstanceStatus {
     /// none means "not reported", never "on no node".
     #[serde(default)]
     pub node: Option<String>,
+    /// The console password generation this machine holds, as the agent last
+    /// applied it (see `InstanceSpec::console_password_generation`). `None` is
+    /// "not reported" — an older agent, or one that has not looked — never
+    /// "has no password".
+    #[serde(default)]
+    pub console_password_generation: Option<u32>,
     #[serde(default)]
     pub private_ip: Option<String>,
     /// Every adapter this machine has, and whether the host has actually seen
@@ -2063,6 +2078,7 @@ mod additions_of_11_september {
             rebooted_token: None,
             local_id: Some("101".into()),
             node: None,
+            console_password_generation: None,
             private_ip: Some("10.200.99.5".into()),
             adapters: vec![AdapterStatus {
                 name: "net1".into(),
@@ -2364,6 +2380,7 @@ mod stream_credential_tests {
             rebooted_token: None,
             local_id: Some("101".into()),
             node: None,
+            console_password_generation: None,
             private_ip: Some("10.200.99.5".into()),
             adapters: vec![],
             diagnostics: None,
@@ -2765,6 +2782,7 @@ mod secret_vocabulary_tests {
     const NOT_A_SECRET: &[(&str, &str)] = &[
         ("ssh_keys", "public keys by contract — a private key is never accepted here"),
         ("console_password_hash", "a crypt(3) verifier, not the plaintext it verifies"),
+        ("console_password_generation", "a counter of resets: which password, never what it is"),
         ("reboot_token", "an idempotency nonce, so one reboot is applied once. It authenticates nothing"),
         ("rebooted_token", "the agent's echo of that nonce, for the same reason"),
         ("prompt_tokens_total", "a count of model tokens: the collision is with billing vocabulary, not with credentials"),
