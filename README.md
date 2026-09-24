@@ -18,12 +18,13 @@ recover state after a restart, and never parses or branches on their contents.
 
 ```toml
 [dependencies]
-omnuv-protocol = { git = "https://github.com/rsafehelm/omnuv-protocol", tag = "v0.21.0" }
+omnuv-protocol = { git = "https://github.com/rsafehelm/omnuv-protocol", tag = "v0.22.0" }
 ```
 
-The **tag** is the release a consumer pins (`v0.21.0` today); the crate's own
-`version` in Cargo.toml moves separately and more slowly (`0.1.16` at
-`v0.21.0`). Pin the tag. `PROTOCOL_VERSION` is a third number, the wire's.
+The **tag** is the release a consumer pins (`v0.22.0` today); the crate's own
+`version` in Cargo.toml moves separately and more slowly (`0.2.0` at
+`v0.22.0`, a minor bump because the new `Unknown` variants break an exhaustive
+match). Pin the tag. `PROTOCOL_VERSION` is a third number, the wire's.
 
 ## Versioning
 
@@ -47,9 +48,18 @@ against the candidate, without editing their manifests.
 
 ```text
 P='patch."https://github.com/rsafehelm/omnuv-protocol".omnuv-protocol.path="'"$PWD"'"'
-(cd ../omnuv          && SQLX_OFFLINE=true cargo test --workspace --no-run --config "$P"; git checkout Cargo.lock)
-(cd ../omnuv-provider && cargo test --config "$P";                               git checkout Cargo.lock)
+(cd ../omnuv          && cargo update -p omnuv-protocol --config "$P" &&
+   SQLX_OFFLINE=true cargo test --workspace --no-run --config "$P"; git checkout Cargo.lock)
+(cd ../omnuv-provider && cargo update -p omnuv-protocol --config "$P" &&
+   cargo test --config "$P"; git checkout Cargo.lock)
 ```
+
+**Read the output for `was not used in the crate graph`.** Cargo ignores a
+`[patch]` whose version does not match the locked one, and then builds the
+consumer against the old release: a check that passes having tested nothing
+new. `cargo update` under the patch is what makes it apply after a version
+bump; the warning is how to tell it did not. Found on 24 September 2026, the
+first time the crate version moved.
 
 An API change (a new variant, a retyped field) shows here as a consumer that
 no longer compiles, and has to land in that consumer beside the tag bump.
