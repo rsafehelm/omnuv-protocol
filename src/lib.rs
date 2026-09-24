@@ -1,7 +1,7 @@
 //! Public, versioned contract between Omnuv Core and Omnuv Provider agents.
 //!
-//! This crate is PUBLIC. It must never depend on anything under `private/`,
-//! and must never carry marketplace decision logic: no pricing, no provider
+//! This crate is PUBLIC. It must never depend on Omnuv Core or any other
+//! private code, and must never carry marketplace decision logic: no pricing, no provider
 //! ranking, no scheduling policy. It describes resource semantics only.
 //!
 //! Provider-local identifiers (Proxmox node names, PCI addresses, VMIDs) cross
@@ -38,11 +38,12 @@ use serde::{Deserialize, Serialize};
 /// network's identity, the machine's DNS name, and the MAC the guest matches
 /// on.
 ///
-/// That is the second half of the addressing decision in `TODO.md` (S1, C′).
+/// That is the second half of Omnuv's addressing decision (called S1 in its
+/// private queue).
 /// The first half was Core recording the address the overlay allocated instead
 /// of inventing one; this is Core stopping inventing the other one too.
 ///
-/// `CLAUDE.md` said this contract would get a deliberate version rather than
+/// The project's rules said this contract would get a deliberate version rather than
 /// quiet erosion — it is a published interface in a public repository, and an
 /// agent that still sends a gateway status is told so instead of being
 /// silently ignored.
@@ -894,7 +895,8 @@ pub struct NetworkAttachment {
     /// network and hoping the two agreed.
     ///
     /// What a buyer sees is the overlay address, which the overlay allocates
-    /// from a marketplace range and Core records. See S1 in `TODO.md`.
+    /// from a marketplace range and Core records; see the note on
+    /// `PROTOCOL_VERSION`.
     #[serde(default)]
     pub network_id: String,
     /// The name the marketplace publishes for this machine.

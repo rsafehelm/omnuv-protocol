@@ -1,6 +1,6 @@
 //! L2 — the contract, exercised rather than described.
 //!
-//! `docs/testing.md` in the private repository asks for three things here, and
+//! Omnuv's testing plan (kept with Core, not published) asks for three things here, and
 //! the boundary has had none of them since the split: round-trip, version
 //! negotiation, and **the last released agent against current Core**. That last
 //! one is not a nicety. On 13 September a rename of two desired-state names was
