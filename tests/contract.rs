@@ -128,42 +128,52 @@ fn current_types_read_every_released_payload() {
 /// And forward: every key a released payload carries is still a key the current
 /// types **emit**. This is the direction `serde(alias)` does not cover and the
 /// one that takes every provider down at once.
+///
+/// **At every depth, from the released payload itself.** This built its own
+/// spec with `..Default::default()` and compared the top level and
+/// `instances[0]` only, so a key dropped from a network attachment, a GPU or a
+/// worker went unseen, and every field left to the default was never looked
+/// at. Now each golden is parsed into today's types and written out again,
+/// and every key that carried a value must still be there. A null is skipped:
+/// a missing `Option` reads as `None` on the other side.
 #[test]
 fn current_core_still_emits_every_key_a_released_agent_reads() {
-    let now = serde_json::to_value(DesiredState {
-        protocol_version: PROTOCOL_VERSION,
-        version: 0,
-        unchanged: false,
-        inference_workers: Vec::new(),
-        images: Vec::new(),
-        instances: vec![InstanceSpec {
-            id: "33333333-3333-3333-3333-333333333333".into(),
-            intent: Lifecycle::Running,
-            name: "gpu-3".into(),
-            vcpus: 4,
-            memory_mib: 16384,
-            disk_gib: 100,
-            ..Default::default()
-        }],
-    })
-    .expect("serialize");
+    fn missing(old: &serde_json::Value, now: &serde_json::Value, at: &str, out: &mut Vec<String>) {
+        match (old, now) {
+            (serde_json::Value::Object(o), serde_json::Value::Object(n)) => {
+                for (k, v) in o {
+                    if v.is_null() {
+                        continue;
+                    }
+                    match n.get(k) {
+                        Some(nv) => missing(v, nv, &format!("{at}.{k}"), out),
+                        None => out.push(format!("{at}.{k}")),
+                    }
+                }
+            }
+            (serde_json::Value::Array(o), serde_json::Value::Array(n)) => {
+                for (i, v) in o.iter().enumerate() {
+                    match n.get(i) {
+                        Some(nv) => missing(v, nv, &format!("{at}[{i}]"), out),
+                        None => out.push(format!("{at}[{i}]")),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 
     for (name, body) in golden() {
         let old: serde_json::Value = serde_json::from_str(&body).expect("golden is json");
-        for key in old.as_object().expect("object").keys() {
-            assert!(
-                now.get(key).is_some(),
-                "{name} reads `{key}` at the top level and current Core no longer \
-                 emits it — an agent on that version gets a payload it cannot \
-                 parse, on its next poll, all of them at once"
-            );
-        }
-        for key in old["instances"][0].as_object().expect("instance").keys() {
-            assert!(
-                now["instances"][0].get(key).is_some(),
-                "{name} reads `instances[].{key}` and current Core no longer emits it"
-            );
-        }
+        let parsed: DesiredState = serde_json::from_str(&body).expect("today's types read the release");
+        let now = serde_json::to_value(parsed).expect("serialize");
+        let mut gone = Vec::new();
+        missing(&old, &now, "", &mut gone);
+        assert!(
+            gone.is_empty(),
+            "{name} carries {gone:?} and current Core no longer emits them — an agent on \
+             that version gets a payload it cannot parse, on its next poll, all of them at once"
+        );
     }
 }
 
