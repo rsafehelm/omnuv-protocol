@@ -165,7 +165,8 @@ fn current_core_still_emits_every_key_a_released_agent_reads() {
 
     for (name, body) in golden() {
         let old: serde_json::Value = serde_json::from_str(&body).expect("golden is json");
-        let parsed: DesiredState = serde_json::from_str(&body).expect("today's types read the release");
+        let parsed: DesiredState =
+            serde_json::from_str(&body).expect("today's types read the release");
         let now = serde_json::to_value(parsed).expect("serialize");
         let mut gone = Vec::new();
         missing(&old, &now, "", &mut gone);
@@ -211,7 +212,10 @@ fn a_version_below_the_floor_is_refused_with_its_reason() {
         "the reason travels in the message an operator actually sees"
     );
 
-    assert!(negotiate(&[]).is_err(), "a peer offering nothing is refused");
+    assert!(
+        negotiate(&[]).is_err(),
+        "a peer offering nothing is refused"
+    );
     assert!(
         negotiate(&[PROTOCOL_VERSION + 1]).is_err(),
         "a peer that speaks only a version we do not is refused rather than guessed at"
@@ -267,7 +271,10 @@ fn golden() -> Vec<(String, String)> {
 fn the_gpu_node_is_additive_in_both_directions() {
     for (name, body) in golden() {
         let state: DesiredState = serde_json::from_str(&body).expect("a released payload");
-        assert_eq!(state.instances[0].gpu_node, None, "{name} predates the node and must read as none");
+        assert_eq!(
+            state.instances[0].gpu_node, None,
+            "{name} predates the node and must read as none"
+        );
     }
 
     let with = InstanceSpec {
@@ -281,5 +288,8 @@ fn the_gpu_node_is_additive_in_both_directions() {
     assert_eq!(back.gpu_node.as_deref(), Some("nuc2"));
 
     let without = serde_json::to_value(InstanceSpec::default()).expect("serialize");
-    assert!(without.get("gpu_node").is_none(), "a machine with no cards sends a new key");
+    assert!(
+        without.get("gpu_node").is_none(),
+        "a machine with no cards sends a new key"
+    );
 }

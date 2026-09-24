@@ -103,8 +103,7 @@ pub const MINIMUM_PROTOCOL_VERSION: u32 = 5;
 ///
 /// Kept in the same change as the floor it explains — a stale reason is worse
 /// than none, because it is believed.
-pub const MINIMUM_PROTOCOL_VERSION_REASON: &str =
-    "protocol 4 and below describe the per-provider gateway that topology v2 \
+pub const MINIMUM_PROTOCOL_VERSION_REASON: &str = "protocol 4 and below describe the per-provider gateway that topology v2 \
      removed: an agent speaking one waits for desired state Core no longer \
      issues, and reports wiring that no longer exists";
 
@@ -610,7 +609,10 @@ pub struct DnsRecord {
 
 /// A buyer's virtual machine, normalized. The driver translates this into
 /// runtime-native resources; nothing here names Proxmox, KubeVirt or OpenStack.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+// `Debug` is written out below rather than derived: the console password's
+// hash is attackable offline, and a derived `Debug` printed it through every
+// `{:?}` on a spec or a desired state.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct InstanceSpec {
     /// How long Core is still prepared to wait for this machine, in seconds.
     ///
@@ -715,6 +717,56 @@ pub struct InstanceSpec {
     /// did.
     #[serde(default)]
     pub overlay: Option<OverlayEnrolment>,
+}
+
+// Exhaustive, like `TunnelFrame`'s: no `..`, so a new field does not compile
+// until somebody decides here whether it may be printed.
+impl std::fmt::Debug for InstanceSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let InstanceSpec {
+            budget_secs,
+            id,
+            intent,
+            name,
+            image,
+            vcpus,
+            memory_mib,
+            disk_gib,
+            ssh_keys,
+            console_password_hash,
+            console_password_generation,
+            built,
+            gpu_local_ids,
+            gpu_node,
+            reboot_token,
+            network,
+            recipe,
+            overlay,
+        } = self;
+        f.debug_struct("InstanceSpec")
+            .field("budget_secs", budget_secs)
+            .field("id", id)
+            .field("intent", intent)
+            .field("name", name)
+            .field("image", image)
+            .field("vcpus", vcpus)
+            .field("memory_mib", memory_mib)
+            .field("disk_gib", disk_gib)
+            .field("ssh_keys", ssh_keys)
+            .field(
+                "console_password_hash",
+                &console_password_hash.as_ref().map(|_| "<redacted>"),
+            )
+            .field("console_password_generation", console_password_generation)
+            .field("built", built)
+            .field("gpu_local_ids", gpu_local_ids)
+            .field("gpu_node", gpu_node)
+            .field("reboot_token", reboot_token)
+            .field("network", network)
+            .field("recipe", recipe)
+            .field("overlay", overlay)
+            .finish()
+    }
 }
 
 /// What a machine needs to enrol itself into its buyer's overlay.
@@ -1473,7 +1525,11 @@ impl Observation {
 ///
 /// Text frames carrying JSON: the payloads are themselves JSON or SSE, so a
 /// binary framing layer would buy nothing and cost debuggability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` is written out below rather than derived: `body` and `data` carry a
+/// buyer's prompts, a model's answers and console keystrokes, typed passwords
+/// included, and a derived `Debug` printed them through any `{:?}` on a frame.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum TunnelFrame {
     /// Core -> provider: run this request against a local worker.
@@ -1486,31 +1542,58 @@ pub enum TunnelFrame {
         body: String,
     },
     /// Core -> provider: the caller went away; stop work on this id.
-    Cancel { id: String },
+    Cancel {
+        id: String,
+    },
     /// provider -> Core: response status, before any body.
-    Head { id: String, status: u16 },
+    Head {
+        id: String,
+        status: u16,
+    },
     /// provider -> Core: a body chunk, streamed as it arrives.
-    Chunk { id: String, data: String },
+    Chunk {
+        id: String,
+        data: String,
+    },
     /// provider -> Core: the response is complete.
-    End { id: String },
+    End {
+        id: String,
+    },
     /// provider -> Core: this request failed locally.
-    Error { id: String, message: String },
+    Error {
+        id: String,
+        message: String,
+    },
     /// Core -> provider: open a console on one of this provider's machines.
     ///
     /// Out-of-band access: the hypervisor's own console, so it works when the
     /// machine's network does not, and nothing runs in the guest for it. The
     /// agent answers with `Head` (open) or `Error`, then `ConsoleData` frames
     /// flow both ways until `Cancel` (Core) or `End` (provider).
-    ConsoleOpen { id: String, instance_id: String, kind: ConsoleKind },
+    ConsoleOpen {
+        id: String,
+        instance_id: String,
+        kind: ConsoleKind,
+    },
     /// Either direction: raw console bytes, base64 — a terminal stream is not
     /// UTF-8 at frame boundaries, and the tunnel is text.
-    ConsoleData { id: String, data: String },
+    ConsoleData {
+        id: String,
+        data: String,
+    },
     /// Core -> provider: the buyer's terminal changed size.
-    ConsoleResize { id: String, cols: u16, rows: u16 },
+    ConsoleResize {
+        id: String,
+        cols: u16,
+        rows: u16,
+    },
     /// provider -> Core, after `Head`: a one-time secret the viewer needs to
     /// authenticate inside the console protocol (VNC's password). Minted by
     /// the hypervisor for this session only; never stored.
-    ConsoleCredential { id: String, password: Redacted },
+    ConsoleCredential {
+        id: String,
+        password: Redacted,
+    },
     /// Core -> provider: desired state changed, reconcile now.
     ///
     /// A nudge, not the payload: the agent then fetches desired state over the
@@ -1520,6 +1603,83 @@ pub enum TunnelFrame {
     /// Either direction: liveness, so a silently dead TCP connection is noticed.
     Ping,
     Pong,
+}
+
+/// What a payload is, without what it says: its length.
+struct Elided<'a>(&'a str);
+
+impl std::fmt::Debug for Elided<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes>", self.0.len())
+    }
+}
+
+// **Exhaustive on purpose.** Every variant and field is named, with no `..`,
+// so a field added later does not compile until somebody decides here whether
+// it may be printed.
+impl std::fmt::Debug for TunnelFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TunnelFrame::Request {
+                id,
+                worker_id,
+                path,
+                body,
+            } => f
+                .debug_struct("Request")
+                .field("id", id)
+                .field("worker_id", worker_id)
+                .field("path", path)
+                .field("body", &Elided(body))
+                .finish(),
+            TunnelFrame::Cancel { id } => f.debug_struct("Cancel").field("id", id).finish(),
+            TunnelFrame::Head { id, status } => f
+                .debug_struct("Head")
+                .field("id", id)
+                .field("status", status)
+                .finish(),
+            TunnelFrame::Chunk { id, data } => f
+                .debug_struct("Chunk")
+                .field("id", id)
+                .field("data", &Elided(data))
+                .finish(),
+            TunnelFrame::End { id } => f.debug_struct("End").field("id", id).finish(),
+            TunnelFrame::Error { id, message } => f
+                .debug_struct("Error")
+                .field("id", id)
+                .field("message", message)
+                .finish(),
+            TunnelFrame::ConsoleOpen {
+                id,
+                instance_id,
+                kind,
+            } => f
+                .debug_struct("ConsoleOpen")
+                .field("id", id)
+                .field("instance_id", instance_id)
+                .field("kind", kind)
+                .finish(),
+            TunnelFrame::ConsoleData { id, data } => f
+                .debug_struct("ConsoleData")
+                .field("id", id)
+                .field("data", &Elided(data))
+                .finish(),
+            TunnelFrame::ConsoleResize { id, cols, rows } => f
+                .debug_struct("ConsoleResize")
+                .field("id", id)
+                .field("cols", cols)
+                .field("rows", rows)
+                .finish(),
+            TunnelFrame::ConsoleCredential { id, password } => f
+                .debug_struct("ConsoleCredential")
+                .field("id", id)
+                .field("password", password)
+                .finish(),
+            TunnelFrame::Reconcile => f.write_str("Reconcile"),
+            TunnelFrame::Ping => f.write_str("Ping"),
+            TunnelFrame::Pong => f.write_str("Pong"),
+        }
+    }
 }
 
 /// Which console a machine offers. Decided by its image (`ImageSpec`), never
@@ -1549,7 +1709,11 @@ mod tests {
         InventoryReport {
             protocol_version: PROTOCOL_VERSION,
             runtime: RuntimeKind::Proxmox,
-            capabilities: ComputeCapabilities { vm: true, gpu_passthrough: true, ..Default::default() },
+            capabilities: ComputeCapabilities {
+                vm: true,
+                gpu_passthrough: true,
+                ..Default::default()
+            },
             location: None,
             city: None,
             // What this provider can build from. Absent means it offers the
@@ -1685,7 +1849,8 @@ mod tests {
     #[test]
     fn roundtrips_and_totals() {
         let r = sample();
-        let back: InventoryReport = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        let back: InventoryReport =
+            serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(r, back, "inventory report must survive a JSON roundtrip");
         assert_eq!(back.total_cpu_cores(), 16);
         assert_eq!(back.gpu_count(), 1);
@@ -1700,7 +1865,10 @@ mod tests {
                 path: "/v1/chat/completions".into(),
                 body: "{}".into(),
             },
-            TunnelFrame::Chunk { id: "r1".into(), data: "data: {}\n\n".into() },
+            TunnelFrame::Chunk {
+                id: "r1".into(),
+                data: "data: {}\n\n".into(),
+            },
             TunnelFrame::End { id: "r1".into() },
             TunnelFrame::Ping,
         ];
@@ -1729,9 +1897,17 @@ mod tests {
     fn runtime_kind_wire_names_are_stable() {
         // These strings are the wire contract and land in the providers.runtime
         // column. Changing one is a breaking protocol change.
-        for rk in [RuntimeKind::Proxmox, RuntimeKind::K3sKubeVirt, RuntimeKind::OpenStack] {
+        for rk in [
+            RuntimeKind::Proxmox,
+            RuntimeKind::K3sKubeVirt,
+            RuntimeKind::OpenStack,
+        ] {
             let json = serde_json::to_string(&rk).unwrap();
-            assert_eq!(json, format!("\"{}\"", rk.as_str()), "serde name must match as_str()");
+            assert_eq!(
+                json,
+                format!("\"{}\"", rk.as_str()),
+                "serde name must match as_str()"
+            );
         }
     }
 }
@@ -1768,7 +1944,10 @@ mod workload_tests {
     #[test]
     fn a_report_survives_a_round_trip() {
         let json = serde_json::to_string(&report()).unwrap();
-        assert_eq!(serde_json::from_str::<WorkloadReport>(&json).unwrap(), report());
+        assert_eq!(
+            serde_json::from_str::<WorkloadReport>(&json).unwrap(),
+            report()
+        );
     }
 
     /// The whole reason `telemetry` did not bump PROTOCOL_VERSION. An agent
@@ -1822,7 +2001,10 @@ mod workload_tests {
         ] {
             // The wire words, which a rename could make collide; the variants
             // themselves are distinct by construction.
-            let (wa, wb) = (serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap());
+            let (wa, wb) = (
+                serde_json::to_string(&a).unwrap(),
+                serde_json::to_string(&b).unwrap(),
+            );
             assert_ne!(wa, wb);
             assert_eq!(serde_json::from_str::<WorkloadHealth>(&wa).unwrap(), a);
             assert_eq!(serde_json::from_str::<WorkloadHealth>(&wb).unwrap(), b);
@@ -1862,7 +2044,11 @@ mod selfcheck_tests {
             assert_eq!(&back, c);
         }
         let kind = |c: &SelfCheck| serde_json::to_value(c).unwrap()["kind"].clone();
-        assert_ne!(kind(&exists), kind(&reaches), "presence and connectivity travel as one kind");
+        assert_ne!(
+            kind(&exists),
+            kind(&reaches),
+            "presence and connectivity travel as one kind"
+        );
     }
 
     /// Unknown is not a pass and not a failure. A machine still booting has not
@@ -1877,8 +2063,14 @@ mod selfcheck_tests {
             .map(|r| serde_json::to_string(r).unwrap())
             .collect();
         assert_eq!(words[2], "\"unknown\"");
-        assert!(words[0] != words[2] && words[1] != words[2] && words[0] != words[1], "{words:?}");
-        for (r, w) in [CheckResult::Pass, CheckResult::Fail, CheckResult::Unknown].iter().zip(&words) {
+        assert!(
+            words[0] != words[2] && words[1] != words[2] && words[0] != words[1],
+            "{words:?}"
+        );
+        for (r, w) in [CheckResult::Pass, CheckResult::Fail, CheckResult::Unknown]
+            .iter()
+            .zip(&words)
+        {
             assert_eq!(&serde_json::from_str::<CheckResult>(w).unwrap(), r);
         }
     }
@@ -1964,7 +2156,10 @@ pub fn corroborate(
     let source = probe.source.as_deref();
     // The port the probe dialled, when its target says one; a connection the
     // machine saw on another port is another conversation.
-    let port = probe.target.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok());
+    let port = probe
+        .target
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok());
     let saw_this_prober = observed.iter().any(|o| {
         source.is_some_and(|s| o.peer == s)
             && port.is_none_or(|p| o.port == p)
@@ -2005,7 +2200,11 @@ mod handshake_tests {
     }
 
     fn seen(peer: &str, at: u64) -> ObservedPeer {
-        ObservedPeer { peer: peer.into(), port: 8080, at_unix: at }
+        ObservedPeer {
+            peer: peer.into(),
+            port: 8080,
+            at_unix: at,
+        }
     }
 
     /// Provider-supplied times near the end of u64 answer, rather than
@@ -2015,33 +2214,70 @@ mod handshake_tests {
     /// finding.
     #[test]
     fn a_report_from_before_the_probe_cannot_call_it_an_impostor() {
-        assert_eq!(corroborate(&probe(ProbeOutcome::Connected, 1000), &[], Some(995)), Corroboration::Unknown);
-        assert_eq!(corroborate(&probe(ProbeOutcome::Connected, 1000), &[], Some(1005)), Corroboration::Impostor);
+        assert_eq!(
+            corroborate(&probe(ProbeOutcome::Connected, 1000), &[], Some(995)),
+            Corroboration::Unknown
+        );
+        assert_eq!(
+            corroborate(&probe(ProbeOutcome::Connected, 1000), &[], Some(1005)),
+            Corroboration::Impostor
+        );
     }
 
     /// Seen from the prober's address but on another port is not this probe.
     #[test]
     fn a_connection_on_another_port_is_not_this_one() {
-        let other_port = ObservedPeer { peer: "100.93.27.247".into(), port: 22, at_unix: 1000 };
-        assert_eq!(corroborate(&probe(ProbeOutcome::Connected, 1000), &[other_port], Some(1010)), Corroboration::Impostor);
-        assert_eq!(corroborate(&probe(ProbeOutcome::Connected, 1000), &[seen("100.93.27.247", 1000)], Some(1010)),
-                   Corroboration::Confirmed);
+        let other_port = ObservedPeer {
+            peer: "100.93.27.247".into(),
+            port: 22,
+            at_unix: 1000,
+        };
+        assert_eq!(
+            corroborate(
+                &probe(ProbeOutcome::Connected, 1000),
+                &[other_port],
+                Some(1010)
+            ),
+            Corroboration::Impostor
+        );
+        assert_eq!(
+            corroborate(
+                &probe(ProbeOutcome::Connected, 1000),
+                &[seen("100.93.27.247", 1000)],
+                Some(1010)
+            ),
+            Corroboration::Confirmed
+        );
     }
 
     #[test]
     fn a_time_at_the_end_of_the_range_does_not_overflow() {
         let far = u64::MAX - 1;
         assert_eq!(
-            corroborate(&probe(ProbeOutcome::Connected, 1000), &[seen("100.93.27.247", far)], Some(far)),
+            corroborate(
+                &probe(ProbeOutcome::Connected, 1000),
+                &[seen("100.93.27.247", far)],
+                Some(far)
+            ),
             Corroboration::Impostor
         );
-        assert_eq!(corroborate(&probe(ProbeOutcome::Connected, far), &[seen("100.93.27.247", far)], Some(far)),
-                   Corroboration::Confirmed);
+        assert_eq!(
+            corroborate(
+                &probe(ProbeOutcome::Connected, far),
+                &[seen("100.93.27.247", far)],
+                Some(far)
+            ),
+            Corroboration::Confirmed
+        );
     }
 
     #[test]
     fn both_ends_agreeing_is_the_only_confirmation() {
-        let c = corroborate(&probe(ProbeOutcome::Connected, 1000), &[seen("100.93.27.247", 1000)], Some(1010));
+        let c = corroborate(
+            &probe(ProbeOutcome::Connected, 1000),
+            &[seen("100.93.27.247", 1000)],
+            Some(1010),
+        );
         assert_eq!(c, Corroboration::Confirmed);
     }
 
@@ -2052,7 +2288,11 @@ mod handshake_tests {
         let c = corroborate(&probe(ProbeOutcome::Connected, 1000), &[], Some(1010));
         assert_eq!(c, Corroboration::Impostor);
         // And a connection from a *different* source is not our probe either.
-        let c = corroborate(&probe(ProbeOutcome::Connected, 1000), &[seen("10.0.0.9", 1000)], Some(1010));
+        let c = corroborate(
+            &probe(ProbeOutcome::Connected, 1000),
+            &[seen("10.0.0.9", 1000)],
+            Some(1010),
+        );
         assert_eq!(c, Corroboration::Impostor);
     }
 
@@ -2068,7 +2308,11 @@ mod handshake_tests {
     /// on a correctly fenced bridge it should be impossible.
     #[test]
     fn a_connection_nobody_made() {
-        let c = corroborate(&probe(ProbeOutcome::TimedOut, 1000), &[seen("100.93.27.247", 1000)], Some(1010));
+        let c = corroborate(
+            &probe(ProbeOutcome::TimedOut, 1000),
+            &[seen("100.93.27.247", 1000)],
+            Some(1010),
+        );
         assert_eq!(c, Corroboration::Unexpected);
     }
 
@@ -2087,7 +2331,10 @@ mod handshake_tests {
     /// must not be counted against it.
     #[test]
     fn a_silent_responder_is_unknown_not_guilty() {
-        assert_eq!(corroborate(&probe(ProbeOutcome::Connected, 5000), &[], None), Corroboration::Unknown);
+        assert_eq!(
+            corroborate(&probe(ProbeOutcome::Connected, 5000), &[], None),
+            Corroboration::Unknown
+        );
         // Reported long before the probe: its account cannot cover it.
         assert_eq!(
             corroborate(&probe(ProbeOutcome::Connected, 5000), &[], Some(100)),
@@ -2110,7 +2357,11 @@ mod handshake_tests {
     #[test]
     fn a_probe_survives_a_round_trip() {
         let p = probe(ProbeOutcome::Connected, 1000);
-        assert_eq!(serde_json::from_str::<ReachabilityReport>(&serde_json::to_string(&p).unwrap()).unwrap(), p);
+        assert_eq!(
+            serde_json::from_str::<ReachabilityReport>(&serde_json::to_string(&p).unwrap())
+                .unwrap(),
+            p
+        );
     }
 }
 
@@ -2281,7 +2532,10 @@ mod observation_tests {
     fn an_older_agents_report_still_parses() {
         let older = r#"{"protocol_version":5,"instances":[],"workers":[]}"#;
         let r: StatusReport = serde_json::from_str(older).expect("older report must parse");
-        assert!(r.observation.is_none(), "an absent observation is absent, not defaulted to complete");
+        assert!(
+            r.observation.is_none(),
+            "an absent observation is absent, not defaulted to complete"
+        );
         const {
             assert!(
                 MINIMUM_PROTOCOL_VERSION <= 5,
@@ -2333,8 +2587,10 @@ mod protocol_six_tests {
         // not punished for it.
         for key in ["lifecycle", "intent"] {
             for value in ["deleted", "absent"] {
-                let raw = json
-                    .replace("\"lifecycle\":\"deleted\"", &format!("\"{key}\":\"{value}\""));
+                let raw = json.replace(
+                    "\"lifecycle\":\"deleted\"",
+                    &format!("\"{key}\":\"{value}\""),
+                );
                 let back: InstanceSpec = serde_json::from_str(&raw)
                     .unwrap_or_else(|e| panic!("{key}={value} must parse: {e}"));
                 assert_eq!(back.intent, Lifecycle::Absent);
@@ -2361,14 +2617,20 @@ mod protocol_six_tests {
             // this replaced, `starts_with("Stop\"")`, could never match a
             // Debug name and so never ran.
             assert!(
-                !["Start", "Stop", "Restart", "Reboot", "Delete", "Destroy", "Create"].contains(&name.as_str())
+                ![
+                    "Start", "Stop", "Restart", "Reboot", "Delete", "Destroy", "Create"
+                ]
+                .contains(&name.as_str())
                     && !name.starts_with("Delete"),
                 "{name} reads as a command rather than a destination"
             );
         }
         // Legacy on purpose, and the one value where that is worth a comment:
         // every shipped agent parses `deleted`, and none has heard of `absent`.
-        assert_eq!(serde_json::to_string(&Lifecycle::Absent).unwrap(), "\"deleted\"");
+        assert_eq!(
+            serde_json::to_string(&Lifecycle::Absent).unwrap(),
+            "\"deleted\""
+        );
     }
 
     /// The supported range is stated rather than implied, so dropping an old
@@ -2392,8 +2654,7 @@ mod protocol_six_tests {
             "the refusal has to be readable by whoever has to act on it"
         );
         assert!(
-            MINIMUM_PROTOCOL_VERSION_REASON
-                .contains(&(MINIMUM_PROTOCOL_VERSION - 1).to_string()),
+            MINIMUM_PROTOCOL_VERSION_REASON.contains(&(MINIMUM_PROTOCOL_VERSION - 1).to_string()),
             "the reason names the highest withdrawn version, so raising the \
              floor without updating it fails here rather than in production"
         );
@@ -2422,7 +2683,10 @@ mod rename_is_complete_tests {
             .map(str::trim)
             .filter(|l| l.starts_with("pub lifecycle:"))
             .collect();
-        assert!(offenders.is_empty(), "still declaring lifecycle: {offenders:?}");
+        assert!(
+            offenders.is_empty(),
+            "still declaring lifecycle: {offenders:?}"
+        );
         assert_eq!(
             body.matches("pub intent: Lifecycle").count(),
             2,
@@ -2507,11 +2771,17 @@ mod stream_credential_tests {
         };
 
         let shown = format!("{creds:?}");
-        assert!(!shown.contains(PASSWORD), "the password is in Debug output: {shown}");
+        assert!(
+            !shown.contains(PASSWORD),
+            "the password is in Debug output: {shown}"
+        );
         // The whole line, not a substring of it. A field added to this type
         // later fails here, which is the point: a new field on a credential is
         // exactly when somebody should be made to look at `Debug` again.
-        assert_eq!(shown, r#"StreamCredentials { user: "omnuv", password: <redacted> }"#);
+        assert_eq!(
+            shown,
+            r#"StreamCredentials { user: "omnuv", password: <redacted> }"#
+        );
 
         let nested = format!(
             "{:?}",
@@ -2522,7 +2792,10 @@ mod stream_credential_tests {
                 stream_credentials: Some(creds.clone()),
             })
         );
-        assert!(!nested.contains(PASSWORD), "the password escapes through the status: {nested}");
+        assert!(
+            !nested.contains(PASSWORD),
+            "the password escapes through the status: {nested}"
+        );
 
         // And serialization is deliberately *not* redacted. Stated here so that
         // anyone tempted to "finish the job" by redacting `Serialize` too
@@ -2703,6 +2976,79 @@ mod redaction_tests {
         );
     }
 
+    /// The console password's hash and the tunnel's payloads print as what
+    /// they are, never as what they say: through a spec, through a desired
+    /// state that carries it, and through every frame with a payload.
+    #[test]
+    fn debug_elides_the_hash_and_the_payloads() {
+        const HASH: &str = "$6$saltsalt$Qm9vYmFyYmF6cXV4";
+        let spec = InstanceSpec {
+            console_password_hash: Some(HASH.into()),
+            name: "gpu-1".into(),
+            ..Default::default()
+        };
+        let desired = DesiredState {
+            protocol_version: PROTOCOL_VERSION,
+            version: 1,
+            unchanged: false,
+            inference_workers: vec![],
+            instances: vec![spec.clone()],
+            images: vec![],
+        };
+        for printed in [
+            format!("{spec:?}"),
+            format!("{desired:?}"),
+            format!("{spec:#?}"),
+        ] {
+            assert!(!printed.contains(HASH), "the hash printed: {printed}");
+            assert!(
+                printed.contains("<redacted>") && printed.contains("gpu-1"),
+                "{printed}"
+            );
+        }
+        let unset = format!("{:?}", InstanceSpec::default());
+        assert!(
+            unset.contains("console_password_hash: None"),
+            "an absent hash must still read as absent: {unset}"
+        );
+
+        let said = "my password is hunter2";
+        for frame in [
+            TunnelFrame::Request {
+                id: "r".into(),
+                worker_id: "w".into(),
+                path: "/v1/chat".into(),
+                body: said.into(),
+            },
+            TunnelFrame::Chunk {
+                id: "r".into(),
+                data: said.into(),
+            },
+            TunnelFrame::ConsoleData {
+                id: "c".into(),
+                data: said.into(),
+            },
+        ] {
+            let printed = format!("{frame:?}");
+            assert!(!printed.contains("hunter2"), "a payload printed: {printed}");
+            assert!(
+                printed.contains(&format!("<{} bytes>", said.len())),
+                "{printed}"
+            );
+        }
+        let printed = format!(
+            "{:?}",
+            TunnelFrame::Error {
+                id: "r".into(),
+                message: "worker gone".into()
+            }
+        );
+        assert!(
+            printed.contains("worker gone"),
+            "an error's message is not a payload: {printed}"
+        );
+    }
+
     /// And the other direction: payloads as they are written today, by a peer
     /// that has never heard of this type, still parse. This is the half
     /// `serde(alias)` does not cover and the half that takes providers down
@@ -2807,11 +3153,25 @@ mod source_scan {
 
         // `Corroboration` is declared *after* a test module. It is in this list
         // as the regression test for the old truncating scope, not as decoration.
-        for marker in ["pub struct DesiredState", "pub enum Corroboration", "pub fn corroborate"] {
-            assert!(body.contains(marker), "production code was stripped away: {marker}");
+        for marker in [
+            "pub struct DesiredState",
+            "pub enum Corroboration",
+            "pub fn corroborate",
+        ] {
+            assert!(
+                body.contains(marker),
+                "production code was stripped away: {marker}"
+            );
         }
-        for marker in ["JustChecks", "neither_formatter_shows_anything_at_all", "0E38B183"] {
-            assert!(!body.contains(marker), "test code survived the strip: {marker}");
+        for marker in [
+            "JustChecks",
+            "neither_formatter_shows_anything_at_all",
+            "0E38B183",
+        ] {
+            assert!(
+                !body.contains(marker),
+                "test code survived the strip: {marker}"
+            );
         }
     }
 }
@@ -2840,8 +3200,16 @@ mod secret_vocabulary_tests {
 
     /// A name says "secret" when any underscore-separated part of it is one of
     /// these, singular or plural.
-    const VOCABULARY: &[&str] =
-        &["secret", "password", "passwd", "token", "key", "credential", "ticket", "auth"];
+    const VOCABULARY: &[&str] = &[
+        "secret",
+        "password",
+        "passwd",
+        "token",
+        "key",
+        "credential",
+        "ticket",
+        "auth",
+    ];
 
     /// Names that read as secrets and are not, each with the reason it is let
     /// through. **The reason is the load-bearing half.** A bare list is a list
@@ -2849,15 +3217,42 @@ mod secret_vocabulary_tests {
     /// detecting; being made to write a sentence is the entire cost of this
     /// control, and the only thing between it and decoration.
     const NOT_A_SECRET: &[(&str, &str)] = &[
-        ("ssh_keys", "public keys by contract — a private key is never accepted here"),
-        ("console_password_hash", "a crypt(3) verifier, not the plaintext it verifies"),
-        ("console_password_generation", "a counter of resets: which password, never what it is"),
-        ("reboot_token", "an idempotency nonce, so one reboot is applied once. It authenticates nothing"),
-        ("rebooted_token", "the agent's echo of that nonce, for the same reason"),
-        ("prompt_tokens_total", "a count of model tokens: the collision is with billing vocabulary, not with credentials"),
-        ("generation_tokens_total", "the same count, the other direction"),
-        ("stream_credentials", "the container. Its own `password` field is scanned on its own line, which is where the secret actually is"),
-        ("auth_mode", "an enum saying key-or-password, and neither of them"),
+        (
+            "ssh_keys",
+            "public keys by contract — a private key is never accepted here",
+        ),
+        (
+            "console_password_hash",
+            "a crypt(3) verifier, typed String so no consumer breaks; InstanceSpec's hand-written Debug prints it as <redacted>, which debug_elides_the_hash_and_the_payloads asserts",
+        ),
+        (
+            "console_password_generation",
+            "a counter of resets: which password, never what it is",
+        ),
+        (
+            "reboot_token",
+            "an idempotency nonce, so one reboot is applied once. It authenticates nothing",
+        ),
+        (
+            "rebooted_token",
+            "the agent's echo of that nonce, for the same reason",
+        ),
+        (
+            "prompt_tokens_total",
+            "a count of model tokens: the collision is with billing vocabulary, not with credentials",
+        ),
+        (
+            "generation_tokens_total",
+            "the same count, the other direction",
+        ),
+        (
+            "stream_credentials",
+            "the container. Its own `password` field is scanned on its own line, which is where the secret actually is",
+        ),
+        (
+            "auth_mode",
+            "an enum saying key-or-password, and neither of them",
+        ),
     ];
 
     /// Every `name: type` pair in the body — field declarations and struct
@@ -2882,13 +3277,17 @@ mod secret_vocabulary_tests {
             for piece in line.replace('{', ",").split(',') {
                 let piece = piece.trim();
                 let piece = piece.strip_prefix("pub ").unwrap_or(piece).trim();
-                let Some((name, ty)) = piece.split_once(':') else { continue };
+                let Some((name, ty)) = piece.split_once(':') else {
+                    continue;
+                };
                 let (name, ty) = (name.trim(), ty.trim());
                 // A Rust field name and nothing else: this is what keeps a JSON
                 // key in a string literal (`"setup_key":`) and a path segment
                 // (`AuthMode::SshKey`) out of the results.
                 if name.is_empty()
-                    || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    || !name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
                 {
                     continue;
                 }
