@@ -1962,14 +1962,22 @@ pub fn corroborate(
     }
 
     let source = probe.source.as_deref();
+    // The port the probe dialled, when its target says one; a connection the
+    // machine saw on another port is another conversation.
+    let port = probe.target.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok());
     let saw_this_prober = observed.iter().any(|o| {
         source.is_some_and(|s| o.peer == s)
+            && port.is_none_or(|p| o.port == p)
             && o.at_unix.saturating_add(CORROBORATION_WINDOW_SECS) >= probe.at_unix
             && probe.at_unix.saturating_add(CORROBORATION_WINDOW_SECS) >= o.at_unix
     });
 
     match (probe.outcome, saw_this_prober) {
         (ProbeOutcome::Connected, true) => Corroboration::Confirmed,
+        // **Not seen yet is not an impostor.** A machine whose last report
+        // came before the probe cannot have recorded it; within the window
+        // above, that read as "something else answered".
+        (ProbeOutcome::Connected, false) if reported_at < probe.at_unix => Corroboration::Unknown,
         // Connected to something that is not this machine.
         (ProbeOutcome::Connected, false) => Corroboration::Impostor,
         // Refused is the service saying no over a working path, so the machine
@@ -2002,6 +2010,24 @@ mod handshake_tests {
 
     /// Provider-supplied times near the end of u64 answer, rather than
     /// panicking a debug build or wrapping a release one.
+    /// A machine that has not reported since the probe says nothing about it,
+    /// even inside the window; one that has, and did not see it, is the
+    /// finding.
+    #[test]
+    fn a_report_from_before_the_probe_cannot_call_it_an_impostor() {
+        assert_eq!(corroborate(&probe(ProbeOutcome::Connected, 1000), &[], Some(995)), Corroboration::Unknown);
+        assert_eq!(corroborate(&probe(ProbeOutcome::Connected, 1000), &[], Some(1005)), Corroboration::Impostor);
+    }
+
+    /// Seen from the prober's address but on another port is not this probe.
+    #[test]
+    fn a_connection_on_another_port_is_not_this_one() {
+        let other_port = ObservedPeer { peer: "100.93.27.247".into(), port: 22, at_unix: 1000 };
+        assert_eq!(corroborate(&probe(ProbeOutcome::Connected, 1000), &[other_port], Some(1010)), Corroboration::Impostor);
+        assert_eq!(corroborate(&probe(ProbeOutcome::Connected, 1000), &[seen("100.93.27.247", 1000)], Some(1010)),
+                   Corroboration::Confirmed);
+    }
+
     #[test]
     fn a_time_at_the_end_of_the_range_does_not_overflow() {
         let far = u64::MAX - 1;
