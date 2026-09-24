@@ -39,6 +39,24 @@ understand, and does not reject the whole report. `Unknown` is never sent:
 it means "not understood", and a consumer must not conclude anything from it.
 Any other enum still needs a `PROTOCOL_VERSION` bump for a new variant.
 
+## Before a tag
+
+CI builds and tests this crate alone. It cannot build Core, which is private,
+so the check that matters before a tag is run by hand: both consumers built
+against the candidate, without editing their manifests.
+
+```text
+P='patch."https://github.com/rsafehelm/omnuv-protocol".omnuv-protocol.path="'"$PWD"'"'
+(cd ../omnuv          && SQLX_OFFLINE=true cargo test --workspace --no-run --config "$P"; git checkout Cargo.lock)
+(cd ../omnuv-provider && cargo test --config "$P";                               git checkout Cargo.lock)
+```
+
+An API change (a new variant, a retyped field) shows here as a consumer that
+no longer compiles, and has to land in that consumer beside the tag bump.
+
+`Cargo.lock` is not committed: this is a library, and each consumer's lock
+decides the versions it builds with.
+
 ## Licence
 
 GNU General Public License, version 3 or later, like the agent that depends on
