@@ -917,6 +917,11 @@ pub enum InstanceState {
     Stopping,
     Stopped,
     Error,
+    /// A value this build does not know: a newer peer sent a variant added
+    /// after it. Read as "not understood", never as any of the above; see
+    /// `unknown_variants_are_one_row_not_the_whole_report`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// How a recipe's install went, as the guest itself reports it.
@@ -1129,6 +1134,11 @@ pub enum WorkerState {
     Draining,
     Error,
     Offline,
+    /// A value this build does not know: a newer peer sent a variant added
+    /// after it. Read as "not understood", never as any of the above; see
+    /// `unknown_variants_are_one_row_not_the_whole_report`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Normalized worker state reported upward. `local_id` is opaque to Core.
@@ -1225,6 +1235,11 @@ pub enum WorkloadHealth {
     Starting,
     /// Down.
     Down,
+    /// A value this build does not know: a newer peer sent a variant added
+    /// after it. Read as "not understood", never as any of the above; see
+    /// `unknown_variants_are_one_row_not_the_whole_report`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Where a model is between "nothing on disk" and "ready to serve".
@@ -1248,6 +1263,11 @@ pub enum ModelStage {
     Downloading,
     Loading,
     Loaded,
+    /// A value this build does not know: a newer peer sent a variant added
+    /// after it. Read as "not understood", never as any of the above; see
+    /// `unknown_variants_are_one_row_not_the_whole_report`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One GPU, as the guest sees it.
@@ -1332,6 +1352,7 @@ pub enum CheckResult {
     /// here. Never to be shown as a pass, and never as a failure either: the
     /// difference between "broken" and "not known" is most of the value of
     /// checking at all.
+    #[serde(other)]
     Unknown,
 }
 
@@ -1389,6 +1410,11 @@ pub enum ProbeOutcome {
     TimedOut,
     /// No route at all.
     Unreachable,
+    /// A value this build does not know: a newer peer sent a variant added
+    /// after it. Read as "not understood", never as any of the above; see
+    /// `unknown_variants_are_one_row_not_the_whole_report`.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2974,6 +3000,43 @@ mod redaction_tests {
             .unwrap(),
             r#"{"t":"console_credential","id":"c-1","password":"0E38B183-B8B6-45CE-B93B-2EF63F3D14E4"}"#
         );
+    }
+
+    /// An older peer reads a variant added after it as `Unknown`, and the
+    /// rest of the report still parses: one row not understood, not a whole
+    /// provider's report rejected.
+    #[test]
+    fn unknown_variants_are_one_row_not_the_whole_report() {
+        fn parse<T: serde::de::DeserializeOwned>(s: &str) -> T {
+            serde_json::from_value(serde_json::Value::String(s.into())).unwrap()
+        }
+        assert_eq!(
+            parse::<InstanceState>("HIBERNATING"),
+            InstanceState::Unknown
+        );
+        assert_eq!(parse::<WorkerState>("QUANTISING"), WorkerState::Unknown);
+        assert_eq!(
+            parse::<WorkloadHealth>("throttled"),
+            WorkloadHealth::Unknown
+        );
+        assert_eq!(parse::<ModelStage>("verifying"), ModelStage::Unknown);
+        assert_eq!(parse::<CheckResult>("skipped"), CheckResult::Unknown);
+        assert_eq!(parse::<ProbeOutcome>("filtered"), ProbeOutcome::Unknown);
+        // Known values are unchanged, in both directions.
+        assert_eq!(parse::<InstanceState>("RUNNING"), InstanceState::Running);
+        assert_eq!(
+            serde_json::to_value(ProbeOutcome::TimedOut).unwrap(),
+            "timed_out"
+        );
+
+        let parsed: StatusReport = serde_json::from_str(
+            r#"{"protocol_version":6,"instances":[
+                {"id":"a","state":"HIBERNATING"},
+                {"id":"b","state":"RUNNING"}]}"#,
+        )
+        .expect("a report with one unknown state was rejected whole");
+        assert_eq!(parsed.instances[0].state, InstanceState::Unknown);
+        assert_eq!(parsed.instances[1].state, InstanceState::Running);
     }
 
     /// The console password's hash and the tunnel's payloads print as what

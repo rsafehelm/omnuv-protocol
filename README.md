@@ -31,6 +31,14 @@ The **tag** is the release a consumer pins (`v0.21.0` today); the crate's own
 Additive fields carrying `#[serde(default)]` do not bump it, because an older
 peer ignores them and a newer one fills them in.
 
+A new **variant** is additive too, for the six enums a peer reports state in
+(`InstanceState`, `WorkerState`, `WorkloadHealth`, `ModelStage`, `CheckResult`,
+`ProbeOutcome`). Each has an `Unknown` marked `#[serde(other)]`, so an older
+peer reads a variant it has never seen as `Unknown`, one row it does not
+understand, and does not reject the whole report. `Unknown` is never sent:
+it means "not understood", and a consumer must not conclude anything from it.
+Any other enum still needs a `PROTOCOL_VERSION` bump for a new variant.
+
 ## Licence
 
 GNU General Public License, version 3 or later, like the agent that depends on
