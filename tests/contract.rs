@@ -44,6 +44,7 @@ fn wire_types_round_trip() {
             disk_gib: 100,
             ..Default::default()
         }],
+        poll_interval_secs: None,
     };
 
     let json = serde_json::to_string(&state).expect("serialize");
@@ -81,6 +82,7 @@ fn desired_state_keeps_the_names_a_released_agent_reads() {
             disk_gib: 40,
             ..Default::default()
         }],
+        poll_interval_secs: None,
     };
     let json = serde_json::to_value(&state).expect("serialize");
     let instance = &json["instances"][0];
@@ -292,4 +294,56 @@ fn the_gpu_node_is_additive_in_both_directions() {
         without.get("gpu_node").is_none(),
         "a machine with no cards sends a new key"
     );
+}
+
+/// **Core's poll travels in the answer, and costs a released agent nothing**
+/// (v0.23.0, 26 September 2026). Every released payload reads as no poll,
+/// which is what a Core that predates it sends; `None` is not written, so a
+/// Core that does not set it sends the bytes a released agent always received;
+/// and a value survives the trip in an `unchanged` answer too, because it
+/// describes the answer rather than the collections.
+#[test]
+fn the_poll_interval_is_additive_in_both_directions() {
+    for (name, body) in golden() {
+        let state: DesiredState = serde_json::from_str(&body).expect("a released payload");
+        assert_eq!(state.poll_interval_secs, None, "{name} predates the poll and must read as none");
+    }
+
+    let older: DesiredState =
+        serde_json::from_str(r#"{"protocol_version":6,"version":3,"unchanged":true}"#)
+            .expect("a Core that predates the field is still read");
+    let quiet = serde_json::to_value(&older).expect("serialize");
+    assert!(
+        quiet.get("poll_interval_secs").is_none(),
+        "a poll Core did not set was written anyway: {quiet}"
+    );
+
+    let mut said = older.clone();
+    said.poll_interval_secs = Some(60);
+    let json = serde_json::to_value(&said).expect("serialize");
+    assert_eq!(json["poll_interval_secs"], 60);
+    assert_eq!(json["unchanged"], true);
+    let back: DesiredState = serde_json::from_value(json).expect("deserialize");
+    assert_eq!(back.poll_interval_secs, Some(60));
+}
+
+/// **The heartbeat's body is optional in both directions** (v0.23.0). An
+/// agent that sends none is the default; the default is written as nothing but
+/// braces; the hash round-trips; and a field a later agent adds is ignored
+/// rather than a heartbeat refused.
+#[test]
+fn the_heartbeat_body_is_additive() {
+    let none: Heartbeat = serde_json::from_str("{}").expect("an empty body");
+    assert_eq!(none, Heartbeat::default());
+    assert_eq!(serde_json::to_string(&Heartbeat::default()).unwrap(), "{}");
+
+    let said = Heartbeat { config_hash: Some("0123456789ab".into()) };
+    let text = serde_json::to_string(&said).unwrap();
+    assert_eq!(text, r#"{"config_hash":"0123456789ab"}"#);
+    assert_eq!(serde_json::from_str::<Heartbeat>(&text).unwrap(), said);
+
+    let later: Heartbeat =
+        serde_json::from_str(r#"{"config_hash":"0123456789ab","site_hash":"x"}"#)
+            .expect("a later agent's extra field is not a refusal");
+    assert_eq!(later, said);
 }

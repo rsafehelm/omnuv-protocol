@@ -544,6 +544,48 @@ pub struct DesiredState {
     /// incentive does the regulating, so nothing has to be enforced.
     #[serde(default)]
     pub images: Vec<ImageArtefact>,
+    /// **How long the agent waits between looks when nothing wakes it**, in
+    /// seconds: the poll that makes a lost push cost latency rather than
+    /// correctness.
+    ///
+    /// Core's to set, never the agent's (omnuv's runtime configuration, D33:
+    /// a value both sides use has one owner). Core builds two of its own
+    /// clocks on it — how recent a report must be to prove anything, and how
+    /// long a self-check nobody repeats stays a fact — and a poll chosen on
+    /// the provider's side would quietly break both.
+    ///
+    /// **Sent in every answer, `unchanged` ones included**, which is why it is
+    /// here and not in the handshake: a Core restarted with a new value
+    /// reaches every agent at its next look, without the agent restarting. It
+    /// describes the answer, not the collections above, so it means the same
+    /// in an `unchanged` answer as in a full one.
+    ///
+    /// Additive, with no `PROTOCOL_VERSION` bump: `None` from a Core that
+    /// predates it, and the agent then keeps its own default; an agent that
+    /// predates it ignores it. Zero means not said, like absent: an interval
+    /// of nothing is not a period an agent can keep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_interval_secs: Option<u64>,
+}
+
+/// What an agent says with each heartbeat, `POST /provider/v1/heartbeat`.
+///
+/// The heartbeat carried no body until this existed, and both directions stay
+/// additive: an agent that predates it sends none, which a Core reads as the
+/// default here; a Core that predates it never reads the body at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Heartbeat {
+    /// **Which tunables the agent is running**: twelve lowercase hexadecimal
+    /// digits of a SHA-256 over them, as its own `check-config` prints them
+    /// for the file it was given. So a deployment can prove the running agent
+    /// took the file it wrote, and two agents, or a mirror and production,
+    /// can be compared at a glance.
+    ///
+    /// A hash of the tunables alone: never of a credential, and never of
+    /// where the agent is — two agents running the same timings report the
+    /// same hash. `None` from an agent that does not report one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_hash: Option<String>,
 }
 
 /// One image in the marketplace catalogue: the bytes, and where to get them.
@@ -1848,6 +1890,7 @@ mod tests {
                 bytes: 8_000_000_000,
                 url: "https://api.omnuv.com/v1/provider/images/ubuntu-26.04-gaming".into(),
             }],
+            poll_interval_secs: None,
         })
         .unwrap();
         let old: DesiredStateAsItWasBefore = serde_json::from_str(&with_catalogue).unwrap();
@@ -2928,6 +2971,7 @@ mod redaction_tests {
             inference_workers: vec![],
             instances: vec![spec.clone(), spec.clone()],
             images: vec![],
+            poll_interval_secs: None,
         };
 
         let spec_shown = format!("{spec:?}");
@@ -3059,6 +3103,7 @@ mod redaction_tests {
             inference_workers: vec![],
             instances: vec![spec.clone()],
             images: vec![],
+            poll_interval_secs: None,
         };
         for printed in [
             format!("{spec:?}"),

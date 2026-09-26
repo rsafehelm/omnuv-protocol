@@ -18,13 +18,17 @@ recover state after a restart, and never parses or branches on their contents.
 
 ```toml
 [dependencies]
-omnuv-protocol = { git = "https://github.com/rsafehelm/omnuv-protocol", tag = "v0.22.0" }
+omnuv-protocol = { git = "https://github.com/rsafehelm/omnuv-protocol", tag = "v0.23.0" }
 ```
 
-The **tag** is the release a consumer pins (`v0.22.0` today); the crate's own
-`version` in Cargo.toml moves separately and more slowly (`0.2.0` at
-`v0.22.0`, a minor bump because the new `Unknown` variants break an exhaustive
-match). Pin the tag. `PROTOCOL_VERSION` is a third number, the wire's.
+The **tag** is the release a consumer pins (`v0.23.0` today); the crate's own
+`version` in Cargo.toml moves separately and more slowly. It is `0.3.0` at
+`v0.23.0`, a minor bump because `DesiredState` gained `poll_interval_secs` and
+has no `Default`, so a consumer's struct literal stops compiling until it
+names the field; it was `0.2.0` at `v0.22.0`, because the new `Unknown`
+variants broke an exhaustive match. Pin the tag. `PROTOCOL_VERSION` is a third
+number, the wire's, and neither change moved it: both are additive on the
+wire.
 
 ## Versioning
 
