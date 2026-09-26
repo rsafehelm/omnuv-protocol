@@ -42,9 +42,11 @@ Any other enum still needs a `PROTOCOL_VERSION` bump for a new variant.
 
 ## Before a tag
 
-CI builds and tests this crate alone. It cannot build Core, which is private,
-so the check that matters before a tag is run by hand: both consumers built
-against the candidate, without editing their manifests.
+This crate's own checks (build, test, clippy) run from omnuv, as
+`deployment/onv check --only protocol`; nothing runs on GitHub since 26
+September 2026. They build this crate alone, so the check that matters before
+a tag is run by hand: both consumers built against the candidate, without
+editing their manifests.
 
 ```text
 P='patch."https://github.com/rsafehelm/omnuv-protocol".omnuv-protocol.path="'"$PWD"'"'
