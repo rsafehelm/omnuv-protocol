@@ -347,3 +347,43 @@ fn the_heartbeat_body_is_additive() {
             .expect("a later agent's extra field is not a refusal");
     assert_eq!(later, said);
 }
+
+/// **A held machine's readiness is asked and answered, and costs a released
+/// peer nothing** (v0.24.0, omnuv's machine groups step 2). Every released
+/// payload reads as nothing asked; a spec that asks nothing writes no key, so
+/// a released agent receives the bytes it always did; the answer echoes the
+/// attempt, round-trips, writes no empty blockers, and a report without it
+/// reads as not looked, never as ready.
+#[test]
+fn a_held_machines_readiness_is_additive_in_both_directions() {
+    for (name, body) in golden() {
+        let state: DesiredState = serde_json::from_str(&body).expect("a released payload");
+        assert_eq!(state.instances[0].attempt, None, "{name} predates the question and must read as none");
+    }
+    let quiet = serde_json::to_value(InstanceSpec::default()).expect("serialize");
+    assert!(quiet.get("attempt").is_none(), "a spec that asks nothing wrote the key: {quiet}");
+
+    let asked = InstanceSpec { attempt: Some(3), ..Default::default() };
+    let raw = serde_json::to_value(&asked).expect("serialize");
+    assert_eq!(raw["attempt"], 3);
+    let back: InstanceSpec = serde_json::from_value(raw).expect("round trip");
+    assert_eq!(back.attempt, Some(3));
+
+    let released = r#"{"id":"m","state":"STOPPED"}"#;
+    let old: InstanceStatus = serde_json::from_str(released).expect("a released agent's report");
+    assert_eq!(old.ready_to_start, None, "a report without the answer read as an answer");
+    let written = serde_json::to_value(&old).expect("serialize");
+    assert!(written.get("ready_to_start").is_none(), "an unasked answer was written: {written}");
+
+    let blocked = StartReadiness { attempt: 3, ready: false, blockers: vec!["card 0000:01:00.0 is still attached".into()] };
+    let ready = StartReadiness { attempt: 3, ready: true, blockers: vec![] };
+    for answer in [blocked, ready.clone()] {
+        let report = InstanceStatus { ready_to_start: Some(answer.clone()), ..old.clone() };
+        let json = serde_json::to_value(&report).expect("serialize");
+        assert_eq!(json["ready_to_start"]["attempt"], 3);
+        let back: InstanceStatus = serde_json::from_value(json).expect("round trip");
+        assert_eq!(back.ready_to_start, Some(answer));
+    }
+    let json = serde_json::to_value(&ready).expect("serialize");
+    assert!(json.get("blockers").is_none(), "a ready answer wrote an empty list: {json}");
+}

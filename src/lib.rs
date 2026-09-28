@@ -760,6 +760,15 @@ pub struct InstanceSpec {
     /// did.
     #[serde(default)]
     pub overlay: Option<OverlayEnrolment>,
+    /// **Which attempt Core asks to be ready to start** (v0.24.0, omnuv's
+    /// machine groups step 2). Set only for a machine held stopped in a group:
+    /// the agent runs the start gate's reads on it while it stays stopped and
+    /// answers in [`InstanceStatus::ready_to_start`], echoing this number, so
+    /// an answer about an earlier attempt of the same machine is never read as
+    /// one about this. `None` from a Core that predates it, and for every
+    /// machine not held: nothing is asked, and an agent answers nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
 }
 
 // Exhaustive, like `TunnelFrame`'s: no `..`, so a new field does not compile
@@ -785,6 +794,7 @@ impl std::fmt::Debug for InstanceSpec {
             network,
             recipe,
             overlay,
+            attempt,
         } = self;
         f.debug_struct("InstanceSpec")
             .field("budget_secs", budget_secs)
@@ -808,6 +818,7 @@ impl std::fmt::Debug for InstanceSpec {
             .field("network", network)
             .field("recipe", recipe)
             .field("overlay", overlay)
+            .field("attempt", attempt)
             .finish()
     }
 }
@@ -1093,6 +1104,27 @@ pub struct InstanceStatus {
     /// protocol break — it simply reports nothing, as it always did.
     #[serde(default)]
     pub recipe_progress: Option<RecipeProgress>,
+    /// **Whether this stopped machine could start now** (v0.24.0, omnuv's
+    /// machine groups step 2): the start gate's reads, made on the machine
+    /// while it is built and stopped, for the attempt its spec named
+    /// ([`InstanceSpec::attempt`]). Only for a machine whose spec asked.
+    /// `None` is "not asked, or not looked", never "ready": silence is not an
+    /// answer, which is why `waiting_on` could not carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_to_start: Option<StartReadiness>,
+}
+
+/// **The start gate's answer on a stopped machine** (v0.24.0). `ready` when
+/// nothing blocks a start: its disk, its network, its cards all as a start
+/// needs them. Otherwise `blockers` says what, in the agent's words, as the
+/// start gate itself says it when it refuses a start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartReadiness {
+    /// The attempt the spec named, echoed.
+    pub attempt: u32,
+    pub ready: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blockers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -2478,6 +2510,7 @@ mod additions_of_11_september {
             diagnostics: None,
             message: None,
             recipe_progress: None,
+            ready_to_start: None,
         })
         .unwrap();
 
@@ -2790,6 +2823,7 @@ mod stream_credential_tests {
             diagnostics: None,
             message: None,
             recipe_progress: Some(p),
+            ready_to_start: None,
         }
     }
 
