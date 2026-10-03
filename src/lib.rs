@@ -1000,6 +1000,15 @@ pub struct RecipeProgress {
     /// Which recipe step it was on, when the guest said so: "3/6".
     #[serde(default)]
     pub step: Option<String>,
+    /// What that step is doing, in words a buyer reads: "Starting the
+    /// application" (the Instances redesign, 3 October 2026). Written by the
+    /// install script before each step, so it is there while the install runs.
+    ///
+    /// **Additive and defaulted**, like `stream_credentials`: an agent that
+    /// has never heard of it sends no such key, and a step then shows without
+    /// words. `PROTOCOL_VERSION` does not move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// The failure, in the words the guest used. Never a summary invented
     /// here — a person debugging this needs the original.
     #[serde(default)]
@@ -2844,6 +2853,29 @@ mod stream_credential_tests {
         assert_eq!(p.step.as_deref(), Some("3/6"));
     }
 
+    /// **A step says what it is doing, while it runs**, and an agent that
+    /// sends no label is still read: the words are optional, the step is not.
+    #[test]
+    fn an_install_step_carries_its_words_and_an_older_report_still_reads() {
+        let running = RecipeProgress {
+            status: "running".into(),
+            step: Some("2/3".into()),
+            label: Some("Starting the application".into()),
+            detail: None,
+            stream_credentials: None,
+        };
+        let back: RecipeProgress =
+            serde_json::from_str(&serde_json::to_string(&running).unwrap()).unwrap();
+        assert_eq!(back.label.as_deref(), Some("Starting the application"));
+        let older: RecipeProgress =
+            serde_json::from_str(r#"{"status":"running","step":"2/3"}"#).unwrap();
+        assert_eq!((older.step.as_deref(), older.label), (Some("2/3"), None));
+        // And no label is no key, so an older Core reading a newer agent sees
+        // exactly what it saw before.
+        let quiet = RecipeProgress { label: None, ..running };
+        assert!(!serde_json::to_string(&quiet).unwrap().contains("label"));
+    }
+
     /// An upgraded agent's report survives the trip — inside the status it
     /// rides on rather than on its own, because that is where it will be.
     #[test]
@@ -2851,6 +2883,7 @@ mod stream_credential_tests {
         let sent = status_reporting(RecipeProgress {
             status: "done".into(),
             step: None,
+            label: None,
             detail: None,
             stream_credentials: Some(StreamCredentials {
                 user: "omnuv".into(),
@@ -2893,6 +2926,7 @@ mod stream_credential_tests {
             status_reporting(RecipeProgress {
                 status: "done".into(),
                 step: None,
+                label: None,
                 detail: None,
                 stream_credentials: Some(creds.clone()),
             })
