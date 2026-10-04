@@ -769,6 +769,16 @@ pub struct InstanceSpec {
     /// machine not held: nothing is asked, and an agent answers nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u32>,
+    /// **How this machine fetches its project's web certificate** (v0.26.0,
+    /// omnuv's private names a browser trusts, D-2: pulled by the machine).
+    /// Set only for a machine that serves a web page on its project's private
+    /// name, while its bootstrap credential is unspent. The agent writes it
+    /// where the machine's own timer reads it at first boot; the machine then
+    /// asks Core's public API, over TLS, with a credential of its own. `None`
+    /// from a Core that predates it and for every other machine, and an older
+    /// agent ignores it: the machine is built as before and serves plain HTTP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate: Option<CertificatePull>,
 }
 
 // Exhaustive, like `TunnelFrame`'s: no `..`, so a new field does not compile
@@ -795,6 +805,7 @@ impl std::fmt::Debug for InstanceSpec {
             recipe,
             overlay,
             attempt,
+            certificate,
         } = self;
         f.debug_struct("InstanceSpec")
             .field("budget_secs", budget_secs)
@@ -819,6 +830,7 @@ impl std::fmt::Debug for InstanceSpec {
             .field("recipe", recipe)
             .field("overlay", overlay)
             .field("attempt", attempt)
+            .field("certificate", certificate)
             .finish()
     }
 }
@@ -853,6 +865,25 @@ pub struct OverlayEnrolment {
     /// overlay's own listing and revoke the right one.
     #[serde(default)]
     pub hostname: Option<String>,
+}
+
+/// Where and how a machine fetches its project's web certificate (v0.26.0).
+///
+/// **A bootstrap, not the credential.** The value rides first-boot data, which
+/// sits on a disk its provider can read, so it is worth one exchange: the
+/// machine trades it at Core for a token it keeps to itself, and Core stops
+/// accepting it once that token has fetched once. Core stops sending it at the
+/// same moment, as it stops sending a spent overlay key. The certificate's
+/// private key is never here: the machine fetches it over TLS, and it is
+/// written only on the machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertificatePull {
+    /// Core's public origin, e.g. `https://api.omnuv.com`. Reached over the
+    /// machine's own internet interface, never over the overlay.
+    pub core_url: String,
+    /// The one-exchange credential. [`Redacted`]: it is reached from
+    /// `DesiredState`, which is printed whole by a `{:?}`.
+    pub bootstrap_token: Redacted,
 }
 
 /// A recipe as the machine runtime executes it: a compose file brought up

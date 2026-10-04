@@ -348,6 +348,40 @@ fn the_heartbeat_body_is_additive() {
     assert_eq!(later, said);
 }
 
+/// **A web machine's certificate pull is additive, and its bootstrap never
+/// prints** (v0.26.0, omnuv's private names a browser trusts, D-2). Every
+/// released payload reads as no pull; a spec without one writes no key, so a
+/// released agent receives the bytes it always did; one with a pull carries
+/// the bootstrap's own bytes on the wire and `<redacted>` in every `{:?}` of
+/// the spec that holds it.
+#[test]
+fn a_certificate_pull_is_additive_and_its_bootstrap_never_prints() {
+    for (name, body) in golden() {
+        let state: DesiredState = serde_json::from_str(&body).expect("a released payload");
+        assert_eq!(state.instances[0].certificate, None, "{name} predates the pull and must read as none");
+    }
+    let quiet = serde_json::to_value(InstanceSpec::default()).expect("serialize");
+    assert!(quiet.get("certificate").is_none(), "a spec with no pull wrote the key: {quiet}");
+
+    const SECRET: &str = "cbt_5f0c2a9d4e8b7a61";
+    let pulled = InstanceSpec {
+        certificate: Some(CertificatePull {
+            core_url: "https://api.omnuv.com".into(),
+            bootstrap_token: SECRET.into(),
+        }),
+        ..Default::default()
+    };
+    let raw = serde_json::to_value(&pulled).expect("serialize");
+    assert_eq!(raw["certificate"]["bootstrap_token"], SECRET, "the wire must carry the token's own bytes");
+    assert_eq!(raw["certificate"]["core_url"], "https://api.omnuv.com");
+    let back: InstanceSpec = serde_json::from_value(raw).expect("round trip");
+    assert_eq!(back, pulled);
+
+    let printed = format!("{pulled:?}");
+    assert!(!printed.contains(SECRET), "a spec printed a bootstrap token: {printed}");
+    assert!(printed.contains("bootstrap_token: <redacted>"), "{printed}");
+}
+
 /// **A held machine's readiness is asked and answered, and costs a released
 /// peer nothing** (v0.24.0, omnuv's machine groups step 2). Every released
 /// payload reads as nothing asked; a spec that asks nothing writes no key, so
