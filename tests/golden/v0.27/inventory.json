@@ -1,0 +1,42 @@
+{
+  "protocol_version": 6,
+  "runtime": "proxmox",
+  "capabilities": {
+    "vm": true,
+    "gpu_passthrough": true,
+    "persistent_disk": true,
+    "portable_volume_attach": false,
+    "cloud_init": true,
+    "private_network": true,
+    "inference_worker": true
+  },
+  "nodes": [
+    {
+      "local_id": "pluto",
+      "cpu_cores": 32,
+      "memory_mib": 131072,
+      "disk_gib": 2000,
+      "gpus": [
+        {
+          "local_id": "0000:01:00.0",
+          "vendor": "NVIDIA Corporation",
+          "model": "GA102 [GeForce RTX 3090]",
+          "vram_mib": 24576
+        }
+      ],
+      "committed": null
+    }
+  ],
+  "location": null,
+  "city": null,
+  "images": [
+    "ubuntu-2604",
+    "windows-11-gaming"
+  ],
+  "held_images": [
+    {
+      "id": "ubuntu-2604",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ]
+}

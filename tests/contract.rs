@@ -45,6 +45,7 @@ fn wire_types_round_trip() {
             ..Default::default()
         }],
         poll_interval_secs: None,
+        agent_settings: None,
     };
 
     let json = serde_json::to_string(&state).expect("serialize");
@@ -83,6 +84,7 @@ fn desired_state_keeps_the_names_a_released_agent_reads() {
             ..Default::default()
         }],
         poll_interval_secs: None,
+        agent_settings: None,
     };
     let json = serde_json::to_value(&state).expect("serialize");
     let instance = &json["instances"][0];
@@ -337,7 +339,7 @@ fn the_heartbeat_body_is_additive() {
     assert_eq!(none, Heartbeat::default());
     assert_eq!(serde_json::to_string(&Heartbeat::default()).unwrap(), "{}");
 
-    let said = Heartbeat { config_hash: Some("0123456789ab".into()) };
+    let said = Heartbeat { config_hash: Some("0123456789ab".into()), ..Default::default() };
     let text = serde_json::to_string(&said).unwrap();
     assert_eq!(text, r#"{"config_hash":"0123456789ab"}"#);
     assert_eq!(serde_json::from_str::<Heartbeat>(&text).unwrap(), said);

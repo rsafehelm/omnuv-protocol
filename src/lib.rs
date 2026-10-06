@@ -566,7 +566,112 @@ pub struct DesiredState {
     /// of nothing is not a period an agent can keep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_interval_secs: Option<u64>,
+    /// **The agent's tunables Core owns** (v0.28.0, omnuv's runtime settings,
+    /// D33): see [`AgentSettings`]. Sent in every answer, `unchanged` ones
+    /// included, for the same reason as the poll above: a value changed in
+    /// Core's settings reaches every agent at its next look, without a restart.
+    ///
+    /// **Not part of the view's revision.** A settings change is not a change
+    /// to what the provider should be running, so it moves no `version` and
+    /// never turns an `unchanged` answer into a full one. Core keeps it out of
+    /// whatever it numbers the view by.
+    ///
+    /// Additive: `None` from a Core that predates it or sets nothing, and the
+    /// agent then keeps its own file (agent.yaml) for every member; an agent
+    /// that predates it ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_settings: Option<AgentSettings>,
 }
+
+/// **The agent tunables Core owns, each optional and each bounded on the
+/// agent's side** (v0.28.0, omnuv's modular design, contract change 6).
+///
+/// Narrowed on purpose to the values whose change costs nothing on the
+/// provider: an interval, a cadence, a count, a keep, a label. Not here, and
+/// never to be added without their own decision: the apt mirror and the
+/// workload timings (changing them rewrites every buyer drive or reboots
+/// every inference worker), Core's own URL (embedded in every worker's first
+/// boot), the held view's maximum age (agent-local), and the run lease's T
+/// (the resolver uses the largest T it ever sent, so it needs no
+/// acknowledgement).
+///
+/// ```text
+/// None         the agent keeps the value its own file gives
+/// Some(v)      the agent clamps v to its local bounds, logs a clamp, and
+///              runs what it clamped to
+/// ```
+///
+/// What the agent ran is reported back as [`Heartbeat::settings_hash`], the
+/// [`AgentSettings::hash`] of the values it applied: equal to Core's own hash
+/// of what it sent when nothing was clamped and every member was understood.
+/// A member a newer Core adds is dropped by an older agent's parse, so the two
+/// hashes differ, which is the truthful answer: the agent did not apply it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSettings {
+    /// How often the agent heartbeats, re-armed on every view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_interval_secs: Option<u64>,
+    /// How often the agent pings its tunnel (`timings.tunnelPing`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_ping_secs: Option<u64>,
+    /// How long a tunnel may be silent before the agent leaves it
+    /// (`timings.tunnelSilence`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_silence_secs: Option<u64>,
+    /// How many audit lines one status report carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_lines_per_report: Option<u32>,
+    /// How long a teardown's tombstone is kept (`timings.tombstoneKeep`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tombstone_keep_secs: Option<u64>,
+    /// How often the agent asks which cards to scrub (`timings.scrubEvery`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrub_every_secs: Option<u64>,
+    /// How long a scrub guest may run without a verdict
+    /// (`timings.scrubGuestDeadline`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrub_guest_deadline_secs: Option<u64>,
+    /// How soon the agent looks again at a machine installing a recipe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installwatch_every_secs: Option<u64>,
+    /// The environment label the agent stamps on what it creates
+    /// (`onv-prod`, `onv-test`, …): a label, never a decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+}
+
+impl AgentSettings {
+    /// **The hash both sides compute over a set of settings**: sixteen
+    /// lowercase hexadecimal digits of FNV-1a (64-bit) over the compact JSON
+    /// of `self`, members in declaration order and absent members omitted.
+    ///
+    /// One definition, here, so Core's hash of what it sent and the agent's
+    /// hash of what it applied are the same function. FNV-1a is not a
+    /// cryptographic hash and is not used as one: this proves which values an
+    /// agent runs, between two parties that already trust each other's TLS,
+    /// and a collision costs one unnoticed difference, never access.
+    pub fn hash(&self) -> String {
+        format!("{:016x}", fnv1a(self.canonical().bytes()))
+    }
+
+    /// The compact JSON the hash is taken over: `serde_json`'s, which writes
+    /// members in declaration order and, with `skip_serializing_if`, leaves
+    /// absent ones out.
+    fn canonical(&self) -> String {
+        serde_json::to_string(self).expect("settings of integers and a string always serialize")
+    }
+}
+
+/// FNV-1a, 64-bit: the offset basis and the prime of the published
+/// definition. **Not the constant Core's and the agent's own MAC copies
+/// multiplied by** until this release: they wrote `0x1000_0000_01b3`, which is
+/// 2^44 + 0x1b3 and not the prime 2^40 + 0x1b3. The two products differ only
+/// in bits 40 and up, and a MAC is the low forty bits, so every MAC either
+/// copy ever derived is the one [`marketplace_mac`] derives
+/// (`the_mac_is_the_one_the_old_copies_derived` holds it); the settings hash,
+/// which uses all sixty-four, uses the real prime.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// What an agent says with each heartbeat, `POST /provider/v1/heartbeat`.
 ///
@@ -584,6 +689,36 @@ pub struct Heartbeat {
     /// A hash of the tunables alone: never of a credential, and never of
     /// where the agent is — two agents running the same timings report the
     /// same hash. `None` from an agent that does not report one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_hash: Option<String>,
+    /// **Which of Core's settings the agent applied** (v0.28.0): the
+    /// [`AgentSettings::hash`] of the values it runs, after its own bounds.
+    /// `None` from an agent that predates it, or that has been sent none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_hash: Option<String>,
+    /// **The provider's separately restarted units, each with what it runs**
+    /// (v0.28.0, contract change 11): the agent, the opening applier, the lease
+    /// timer. Empty from an agent that predates it, which Core reads as "not
+    /// reported", never as "none running".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<Component>,
+    /// The lowercase hex SHA-256 of the Workload Agent this agent's worker
+    /// first boots verify (`sha256sum -c`), as compiled into it. Core compares
+    /// it with the binary it serves and escalates a difference: a worker whose
+    /// check fails boots without telemetry, silently. `None` from an agent
+    /// that predates it, or a build with no Workload Agent compiled in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workloadd_sha256: Option<String>,
+}
+
+/// One unit on the provider host and what it runs (v0.28.0).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Component {
+    /// The unit's name: `onv-provider`, `onv-opening`, `onv-lease-expire`.
+    pub name: String,
+    /// Its build, as the agent's own version string is written.
+    pub version: String,
+    /// The hash of the configuration it runs, where it has one of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_hash: Option<String>,
 }
@@ -619,7 +754,19 @@ pub struct ImageArtefact {
     pub bytes: u64,
     /// Where to fetch it. Absolute, and reached over TLS like everything else
     /// the agent talks to.
+    ///
+    /// **Same origin as Core, always** (v0.28.0, contract change 8, taken as a
+    /// rule and not a field): the agent sends its provider token with the
+    /// fetch, so it sends it only to the origin it handshook with, and fetches
+    /// a URL on any other origin without it or not at all. Core serves every
+    /// artefact under its own origin.
     pub url: String,
+    /// **What family of system the image boots** (v0.28.0, contract change 7),
+    /// so a provider knows which images are Windows from the catalogue itself
+    /// rather than from a list kept by hand in its own file. `None` from a
+    /// Core that predates it; the agent then falls back to its own list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_family: Option<OsFamily>,
 }
 
 /// An image a provider is actually holding, and the digest of what it holds.
@@ -638,6 +785,13 @@ pub struct HeldImage {
     /// provider is behind on that id — which makes it offline *for that id*,
     /// not offline.
     pub sha256: String,
+    /// **The node holding this template** (v0.28.0, contract change 13), named
+    /// as the inventory names its nodes. A template is per node, so on a
+    /// provider of several nodes an image held on one is not held on the
+    /// others. `None` from an agent that predates it, read as "not said",
+    /// never as "every node".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 /// One private DNS record. Naming is the marketplace's; a provider never
@@ -1200,6 +1354,16 @@ pub struct InstanceStatus {
     /// answer, which is why `waiting_on` could not carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_to_start: Option<StartReadiness>,
+    /// **What the report concludes, typed** (v0.28.0, contract change 3):
+    /// see [`StatusOutcome`]. `None` from an agent that predates it, and from
+    /// any report that concludes nothing; Core then reads `message` as it
+    /// always has ([`StatusOutcome::from_words`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<StatusOutcome>,
+    /// The volumes a destroy left behind, by the runtime's own ids, with
+    /// `outcome` [`StatusOutcome::DeletedWithResidue`]. Empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub residue: Vec<String>,
 }
 
 /// **The start gate's answer on a stopped machine** (v0.24.0). `ready` when
@@ -1245,6 +1409,14 @@ pub enum Lifecycle {
     /// stays the one every shipped agent already parses.
     #[serde(rename = "deleted", alias = "absent")]
     Absent,
+    /// **A destination this build does not know** (v0.28.0, contract change
+    /// 12): a newer Core sent a variant added after it. Read so that one
+    /// machine is not understood rather than the whole view refused, and
+    /// **acted on not at all**: neither started, stopped nor removed, and
+    /// never sent. A whole view refused would have left the agent maintaining
+    /// an older copy of every machine for the sake of one.
+    #[serde(other)]
+    Unknown,
 }
 
 /// How to execute an inference worker. Carries execution detail (image, model
@@ -1286,6 +1458,16 @@ pub struct InferenceWorkerSpec {
     pub gpu_node: Option<String>,
     /// Port the worker serves its OpenAI-compatible API on.
     pub port: u16,
+    /// **Core holds this worker as built** (finding 6 for workers, typed in
+    /// v0.28.0, contract change 2): the agent never builds a worker sent
+    /// built, and says one it holds nothing of, and owes nothing for, is lost.
+    ///
+    /// Core has sent `"built": true` beside the protocol's fields since 0205,
+    /// and an agent read it by parsing the body a second time. The key and
+    /// its bytes are unchanged: written only when true, and absent read as
+    /// false, which is what a Core that predates it means.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub built: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1351,6 +1533,13 @@ pub struct WorkerStatus {
     /// latency and never truth.
     #[serde(default)]
     pub telemetry: Option<WorkloadReport>,
+    /// What the report concludes, typed (v0.28.0): as on
+    /// [`InstanceStatus::outcome`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<StatusOutcome>,
+    /// As on [`InstanceStatus::residue`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub residue: Vec<String>,
 }
 
 /// What a Workload Agent observes from inside a machine the marketplace owns.
@@ -1505,6 +1694,11 @@ pub enum CheckKind {
     /// The thing actually works: a packet got somewhere and something answered.
     /// This is the one that matters, and the one nothing asked before.
     Connectivity,
+    /// A kind this build does not know (v0.28.0, contract change 12): a newer
+    /// agent added one. One check not understood, never a whole report
+    /// refused. Never sent.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1891,6 +2085,523 @@ impl ConsoleKind {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The control plane, typed (v0.28.0, omnuv's modular design, contract change 1)
+// ---------------------------------------------------------------------------
+//
+// Until v0.28.0 the handshake, its answer, the headers, the route paths, the
+// capability names, the scrub exchange and the leave body lived outside this
+// crate, in four hand copies: Core's, the agent's, and two test fakes, one of
+// them already stale. Every item below is the wire those copies already spoke,
+// byte for byte; what is new is marked with the release that added it, and
+// every new field is optional and left out when absent.
+
+/// `POST`: the agent's first call, [`Handshake`] in, [`HandshakeAccepted`] out.
+pub const ROUTE_HANDSHAKE: &str = "/provider/v1/handshake";
+/// `POST`: an [`InventoryReport`].
+pub const ROUTE_INVENTORY: &str = "/provider/v1/inventory";
+/// `POST`: a [`Heartbeat`].
+pub const ROUTE_HEARTBEAT: &str = "/provider/v1/heartbeat";
+/// `DELETE`: the agent gives its session up, on a clean stop.
+pub const ROUTE_SESSION: &str = "/provider/v1/session";
+/// `GET`: the view, a [`DesiredState`], asked with [`QUERY_KNOWN`].
+pub const ROUTE_DESIRED_STATE: &str = "/provider/v1/desired-state";
+/// `POST`: a [`StatusReport`].
+pub const ROUTE_STATUS: &str = "/provider/v1/status";
+/// `GET` (WebSocket upgrade): the tunnel, [`TunnelFrame`]s both ways.
+pub const ROUTE_TUNNEL: &str = "/provider/v1/tunnel";
+/// `GET`: [`ScrubWants`]; `POST`: [`ScrubReport`] in, [`ScrubAnswer`] out.
+pub const ROUTE_SCRUBS: &str = "/provider/v1/scrubs";
+/// `POST`: [`Leave`]. **Accepted on the provider's bearer token alone**
+/// (v0.28.0, contract change 15): an agent leaving holds no session, and a
+/// Core that asked for one answered every leave 426.
+pub const ROUTE_LEAVE: &str = "/provider/v1/leave";
+/// `GET`: one image's bytes. The route as Core declares it; a path to fetch is
+/// [`image_artefact_path`].
+pub const ROUTE_IMAGE_ARTEFACT: &str = "/provider/v1/images/{id}/artefact";
+
+/// The query parameter a view is asked with: the revision the agent already
+/// holds, so an unchanged view is answered `unchanged` rather than whole.
+pub const QUERY_KNOWN: &str = "known";
+
+/// The path of one image's artefact.
+pub fn image_artefact_path(id: &str) -> String {
+    format!("/provider/v1/images/{id}/artefact")
+}
+
+/// The path a view is asked at, saying the revision already held.
+pub fn desired_state_path(known: u64) -> String {
+    format!("{ROUTE_DESIRED_STATE}?{QUERY_KNOWN}={known}")
+}
+
+/// The session minted at the handshake, sent on every later call.
+pub const HEADER_SESSION: &str = "onv-session";
+/// On every view: the run lease Core grants with it. **A view without it
+/// releases every lease**, so the view and this header come from one handler,
+/// the lease read first.
+pub const HEADER_RUN_LEASE: &str = "onv-run-lease";
+/// On a view, while Core holds this provider in restore mode.
+pub const HEADER_RESTORE: &str = "onv-restore";
+/// On every call from an agent that detected a restore Core has not named
+/// back: the agent's evidence, on one line.
+pub const HEADER_RESTORE_DETECTED: &str = "onv-restore-detected";
+/// On every view: the period the agent reports its inventory at, in seconds.
+pub const HEADER_REPORT_INTERVAL: &str = "onv-report-interval";
+
+/// The agent holds its provider under a session and stops when superseded.
+pub const CAPABILITY_SESSION: &str = "session";
+/// "deleted" is said one complete listing after the destroy, and a volume
+/// left behind is reported as a residue.
+pub const CAPABILITY_PROVEN_DELETE: &str = "proven-delete";
+/// The agent persists its head, says when a view does not extend it, and acts
+/// on nothing while Core names a restore.
+pub const CAPABILITY_RESTORE_MODE: &str = "restore-mode";
+/// The agent stops a leased machine whose last good view is older than T, and
+/// never restarts it.
+pub const CAPABILITY_RUN_LEASE: &str = "run-lease";
+/// The agent reads a worker's `built` and says a built worker it holds nothing
+/// of is lost.
+pub const CAPABILITY_WORKER_LOST: &str = "worker-lost";
+/// The agent answers a held machine's readiness to start.
+pub const CAPABILITY_GROUP_PREPARE: &str = "group-prepare";
+/// The agent asks which of its cards to scrub and reports each outcome typed.
+pub const CAPABILITY_CARD_SCRUB: &str = "card-scrub";
+/// The agent reports its inventory at Core's period, and only when its survey
+/// completed.
+pub const CAPABILITY_REPORT_INTERVAL: &str = "report-interval";
+
+/// **Every capability this contract names.** Core relies on one only where an
+/// agent advertised it, and the floor of what a provider's agents advertised
+/// only rises: a rollback across an addition is answered 426.
+pub const CAPABILITIES: &[&str] = &[
+    CAPABILITY_SESSION,
+    CAPABILITY_PROVEN_DELETE,
+    CAPABILITY_RESTORE_MODE,
+    CAPABILITY_RUN_LEASE,
+    CAPABILITY_WORKER_LOST,
+    CAPABILITY_GROUP_PREPARE,
+    CAPABILITY_CARD_SCRUB,
+    CAPABILITY_REPORT_INTERVAL,
+];
+
+/// What an agent says at its handshake, `POST /provider/v1/handshake`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Handshake {
+    pub agent_version: String,
+    /// The protocol versions the agent speaks: a range, so a Core one version
+    /// apart still finds one ([`negotiate`]).
+    pub protocol_versions: Vec<u32>,
+    #[serde(default)]
+    pub drivers: Drivers,
+    /// What this agent can do that an older one could not, by the
+    /// `CAPABILITY_*` names. A name Core does not know is a newer agent's,
+    /// and means nothing to it.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// **This agent reads the `code` on a refusal** (v0.28.0, contract change
+    /// 4) and acts on it as [`answer_means`] says. Without it the agent acts
+    /// on the status alone, as every agent before it did, and Core answers it
+    /// as it always has.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refusal_codes: bool,
+}
+
+/// The runtimes an agent drives.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Drivers {
+    /// By [`RuntimeKind::as_str`]: `proxmox`, …
+    #[serde(default)]
+    pub compute: Vec<String>,
+}
+
+/// What Core answers a handshake it accepts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandshakeAccepted {
+    pub protocol_version: u32,
+    pub provider_id: String,
+    pub heartbeat_interval_secs: u64,
+    /// The session this agent now holds its provider under, sent back as
+    /// [`HEADER_SESSION`] on every later call. Only for an agent that
+    /// advertised `session`, from a Core that mints them; an answer without
+    /// one means "send none". It authenticates nothing without the bearer
+    /// token, and is redacted in `Debug` all the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<Redacted>,
+    /// This Core names a restore on the view ([`HEADER_RESTORE`]), so an agent
+    /// may arm its own detection. Absent when off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restore_mode: bool,
+    /// The period this agent reports its inventory at. Every Core since D35
+    /// sends it; `None` is one that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_interval_secs: Option<u64>,
+    /// **The agent routes this Core serves** (v0.28.0, contract change 5), by
+    /// the `ROUTE_*` constants. Behind path routing a route may be answered
+    /// by a service that is down or not wired, and its 404 must not read as
+    /// "this Core predates the route". Empty from a Core that predates the
+    /// list: see [`HandshakeAccepted::serves`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub served: Vec<String>,
+}
+
+impl HandshakeAccepted {
+    /// Whether this Core serves `route`: `None` when it did not say (it
+    /// predates [`HandshakeAccepted::served`]), and the agent infers as it
+    /// always did. `Some(true)` makes a 404 from the route an outage, never
+    /// "not supported".
+    pub fn serves(&self, route: &str) -> Option<bool> {
+        if self.served.is_empty() {
+            None
+        } else {
+            Some(self.served.iter().any(|r| r == route))
+        }
+    }
+}
+
+/// What `POST /provider/v1/leave` carries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Leave {
+    /// Why, in the operator's own words: written into every archived row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// **The body of every refusal Core writes**: `{"error": …}` since the first
+/// release, with a machine-readable `code` on the refusals that have one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefusalBody {
+    /// The refusal in words, for a person.
+    pub error: String,
+    /// The refusal for a program (v0.28.0 on agent routes, contract change 4,
+    /// and Core's C1 and C2). `None` from a Core that predates it, and on a
+    /// refusal with nothing more to say than its status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<RefusalCode>,
+    /// The request field the refusal is about, where it is about one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+}
+
+/// **Why Core refused an agent's call, for the agent to act on.**
+///
+/// ```text
+/// superseded          409  another agent's handshake took the provider over:
+///                          final, the agent stops
+/// held                409  at the handshake: another agent holds the provider
+///                          and is still heard; wait it out
+/// withdrawn_version   426  the protocol agreed is no longer spoken
+/// capability_floor    426  the agent advertises less than its provider's floor
+/// cut_off             403  the operator suspended or fenced the provider
+/// unknown_session     401  a session Core does not know, or a restore revoked:
+///                          handshake again
+/// admission_pending   403  the provider awaits an operator's approval
+/// admission_closed    403  admission is closed
+/// admission_full      403  the provider cap is reached
+/// retry               503  unavailable: nothing was decided, ask again
+/// ```
+///
+/// The three `admission_*` codes are **never final**: a pending provider backs
+/// off and asks again, and an approval reaches it without a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalCode {
+    Superseded,
+    Held,
+    WithdrawnVersion,
+    CapabilityFloor,
+    CutOff,
+    UnknownSession,
+    AdmissionPending,
+    AdmissionClosed,
+    AdmissionFull,
+    Retry,
+    /// A code this build does not know, from a newer Core or from a refusal
+    /// meant for a person's console. Read by its status alone. Never sent.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What an answer from Core means for the agent that got it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnswerMeans {
+    /// Core is unwell or unreachable: nothing was decided. The agent may keep
+    /// maintaining the view it holds, and asks again.
+    Unavailable,
+    /// Core refused this agent's credential or session on an ordinary call.
+    /// Nothing is maintained on Core's instructions; the heartbeat handshakes
+    /// again, and that is where a verdict is final.
+    Refused,
+    /// The protocol agreed is no longer accepted: handshake again, since the
+    /// agent speaks a range and another version may still be common.
+    Renegotiate,
+    /// Core will not work with this agent as it is: it stops, and says why.
+    Final,
+    /// Core has not decided against this agent and will not act for it yet:
+    /// a provider awaiting admission, or one held by another agent still
+    /// heard. Back off and ask again; never stop.
+    Wait,
+    /// Any other answer: a request Core considered wrong. Decides nothing.
+    Other,
+}
+
+/// **The per-route meaning of an answer, in one place** (v0.28.0, contract
+/// change 4).
+///
+/// `route` is the path called, without its query. A `code` this build knows
+/// decides before the status; without one, the status decides exactly as
+/// every agent has decided since sessions (lifecycle phase 7):
+///
+/// ```text
+/// status          handshake      any other route
+/// 401             Final          Refused
+/// 403             Refused        Refused
+/// 409             Other (wait)   Final: superseded
+/// 426             Final          Renegotiate
+/// 429, 5xx        Unavailable    Unavailable
+/// anything else   Other          Other
+/// ```
+///
+/// **What Core must answer, so the table holds**: an outage of any service
+/// behind an agent route is 503 (code `retry`), never 401, 404, 409 or 426,
+/// since each of those decides something an outage has not; a database
+/// refusal (SQLSTATE 23001) on an agent route is 503, never 409, which would
+/// stop the agent; and admission is 403 with an `admission_*` code.
+pub fn answer_means(route: &str, status: u16, code: Option<RefusalCode>) -> AnswerMeans {
+    let handshake = route == ROUTE_HANDSHAKE;
+    match code {
+        Some(RefusalCode::Retry) => return AnswerMeans::Unavailable,
+        Some(RefusalCode::AdmissionPending | RefusalCode::AdmissionClosed | RefusalCode::AdmissionFull) => {
+            return AnswerMeans::Wait;
+        }
+        Some(RefusalCode::Held) => return AnswerMeans::Wait,
+        Some(RefusalCode::Superseded) => return AnswerMeans::Final,
+        _ => {}
+    }
+    match status {
+        401 | 426 if handshake => AnswerMeans::Final,
+        409 if !handshake => AnswerMeans::Final,
+        426 => AnswerMeans::Renegotiate,
+        401 | 403 => AnswerMeans::Refused,
+        429 | 500..=599 => AnswerMeans::Unavailable,
+        _ => AnswerMeans::Other,
+    }
+}
+
+/// **What a machine's or worker's report concludes, typed** (v0.28.0,
+/// contract change 3).
+///
+/// Before it these travelled as words in `message`, and Core parsed their
+/// prefixes; [`StatusOutcome::from_words`] is that parser, kept for one
+/// release window so a Core can read an agent that predates the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusOutcome {
+    /// Sent as built, and nothing of it is held here: no guest, no clone in
+    /// flight, nothing owed.
+    Lost,
+    /// Proven gone: one complete listing after the destroy found nothing.
+    Deleted,
+    /// Gone, and volumes stayed behind; they are named in `residue`.
+    DeletedWithResidue,
+    /// Destroyed, and not yet proven gone.
+    NotProvenGone,
+    /// The image the spec names is not offered by this provider.
+    ImageNotOffered,
+    /// Nothing here can hold the spec; `waiting_on` says what is short.
+    Unplaceable,
+    /// An outcome this build does not know. Read as no conclusion. Never sent.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The words a destroy proven gone is reported in.
+pub const WORDS_DELETED: &str = "deleted";
+/// The start of the words of a destroy that left volumes behind; the volumes
+/// follow, separated by spaces.
+pub const WORDS_DELETED_WITH_RESIDUE: &str = "deleted; residue ";
+/// The start of the words of a destroy not yet proven gone.
+pub const WORDS_NOT_PROVEN_GONE: &str = "not proven gone: ";
+/// The start of the words of a machine lost here.
+pub const WORDS_MACHINE_LOST: &str = "this machine is no longer on its provider";
+/// The start of the words of a worker lost here.
+pub const WORDS_WORKER_LOST: &str = "this worker is no longer on its provider";
+/// The end of the words of an image refusal, `image <id> is not offered by
+/// this provider`.
+pub const WORDS_IMAGE_NOT_OFFERED: &str = " is not offered by this provider";
+
+impl StatusOutcome {
+    /// **The outcome a report's words carry, and its residue**, for an agent
+    /// that predates the typed field: the one parser of the sentinels, so
+    /// every reader parses them alike. `None` for words that conclude
+    /// nothing. The words alone: Core's own conditions on a lost report (an
+    /// ERROR, no runtime id, not retryable, waiting on nothing) still apply.
+    pub fn from_words(message: &str) -> Option<(StatusOutcome, Vec<String>)> {
+        if message == WORDS_DELETED {
+            return Some((StatusOutcome::Deleted, Vec::new()));
+        }
+        if let Some(volumes) = message.strip_prefix(WORDS_DELETED_WITH_RESIDUE) {
+            let residue = volumes.split_whitespace().map(str::to_string).collect();
+            return Some((StatusOutcome::DeletedWithResidue, residue));
+        }
+        if message.starts_with(WORDS_NOT_PROVEN_GONE) {
+            return Some((StatusOutcome::NotProvenGone, Vec::new()));
+        }
+        if message.starts_with(WORDS_MACHINE_LOST) || message.starts_with(WORDS_WORKER_LOST) {
+            return Some((StatusOutcome::Lost, Vec::new()));
+        }
+        if message.starts_with("image ") && message.ends_with(WORDS_IMAGE_NOT_OFFERED) {
+            return Some((StatusOutcome::ImageNotOffered, Vec::new()));
+        }
+        None
+    }
+}
+
+/// One card scrub Core wants run, `GET /provider/v1/scrubs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScrubWanted {
+    pub id: String,
+    pub attempt: i32,
+    /// The card, as the provider's inventory named it (a PCI address).
+    pub card: String,
+    /// The node holding it, as the provider named it.
+    pub node: String,
+    pub model: String,
+    /// The scrub image's catalogue id.
+    pub image: String,
+}
+
+/// Core's answer to `GET /provider/v1/scrubs`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScrubWants {
+    #[serde(default)]
+    pub scrubs: Vec<ScrubWanted>,
+}
+
+/// The typed outcome of one scrub attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScrubOutcome {
+    Clean,
+    Failed,
+    /// An outcome this build does not know; Core records it `refused`. Never
+    /// sent.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One attempt's outcome, as the agent reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScrubSaid {
+    pub id: String,
+    pub attempt: i32,
+    pub outcome: ScrubOutcome,
+    /// What the scrub measured ([`ScrubGuestReport`]'s numbers and its
+    /// `persistent` identity) and the agent's words on a failure. Core
+    /// compares `persistent` as a whole, so a key renamed in it fails every
+    /// card's baseline.
+    #[serde(default)]
+    pub detail: serde_json::Value,
+}
+
+/// What `POST /provider/v1/scrubs` carries.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScrubReport {
+    #[serde(default)]
+    pub scrubs: Vec<ScrubSaid>,
+}
+
+/// The result Core records while a restore holds the provider: nothing was
+/// recorded, so the agent keeps the outcome and says it again.
+pub const SCRUB_RESULT_HELD: &str = "held";
+
+/// What Core made of one reported attempt. `result` is the ledger's word —
+/// `clean`, `failed`, `mismatch`, `stale`, `already`, `ended`, `unknown`,
+/// [`SCRUB_RESULT_HELD`] or `refused` — kept a string, since the agent acts
+/// only on `held` and a word added later must not refuse the answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScrubRecorded {
+    pub id: String,
+    pub attempt: i32,
+    pub result: String,
+}
+
+/// Core's answer to `POST /provider/v1/scrubs`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScrubAnswer {
+    #[serde(default)]
+    pub results: Vec<ScrubRecorded>,
+}
+
+/// **What the scrub program writes in its guest**, `/run/onv/scrub.json`
+/// (Core's `onv-scrub.c`), read by the agent through the guest agent. Every
+/// field but `status` is defaulted, so a report written mid-run, or by an
+/// older program, still reads.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScrubGuestReport {
+    /// `running`, `clean` or `failed`.
+    pub status: String,
+    #[serde(default)]
+    pub stage: String,
+    #[serde(default)]
+    pub uptime_s: u64,
+    #[serde(default)]
+    pub cards: u64,
+    #[serde(default)]
+    pub total_mib: u64,
+    #[serde(default)]
+    pub covered_mib: u64,
+    #[serde(default)]
+    pub residue_mib: u64,
+    #[serde(default)]
+    pub verified: bool,
+    #[serde(default)]
+    pub seconds: f64,
+    /// The card's identity the scrub cannot change (`vbios`, `inforom`, `ecc`,
+    /// `serial`), compared by Core against the card's baseline as a whole.
+    #[serde(default)]
+    pub persistent: serde_json::Value,
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// **The MAC of a machine's marketplace interface**, derived from its id
+/// (v0.28.0, contract change 13: one derivation, used by both sides).
+///
+/// Locally administered and unicast (`02:` first), the rest the low forty bits
+/// of FNV-1a over the id's bytes, upper-case hex. Core sends it as
+/// [`NetworkAttachment::mac`]; the agent derives it again to write the
+/// guest's first boot before the machine exists. The two were separate copies
+/// of this function until this release.
+pub fn marketplace_mac(id: &str) -> String {
+    mac_of(fnv1a(id.as_bytes().iter().copied()))
+}
+
+/// The MAC of a machine's egress interface: the same derivation over the id
+/// followed by `onv-egress`, so a machine's two interfaces never collide.
+pub fn egress_mac(id: &str) -> String {
+    mac_of(fnv1a(id.as_bytes().iter().chain(b"onv-egress").copied()))
+}
+
+fn fnv1a(bytes: impl Iterator<Item = u8>) -> u64 {
+    let mut h = FNV_OFFSET;
+    for b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
+fn mac_of(h: u64) -> String {
+    format!(
+        "02:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        (h >> 32) as u8,
+        (h >> 24) as u8,
+        (h >> 16) as u8,
+        (h >> 8) as u8,
+        h as u8
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1914,6 +2625,7 @@ mod tests {
             held_images: vec![HeldImage {
                 id: "ubuntu-26.04".into(),
                 sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+                node: None,
             }],
             nodes: vec![NodeInventory {
                 local_id: "pve".into(),
@@ -2009,8 +2721,10 @@ mod tests {
                 sha256: "abc123".into(),
                 bytes: 8_000_000_000,
                 url: "https://api.omnuv.com/v1/provider/images/ubuntu-26.04-gaming".into(),
+                os_family: None,
             }],
             poll_interval_secs: None,
+            agent_settings: None,
         })
         .unwrap();
         let old: DesiredStateAsItWasBefore = serde_json::from_str(&with_catalogue).unwrap();
@@ -2164,6 +2878,8 @@ mod workload_tests {
             diagnostics: None,
             message: None,
             telemetry: Some(report()),
+            outcome: None,
+            residue: Vec::new(),
         })
         .unwrap();
 
@@ -2599,6 +3315,8 @@ mod additions_of_11_september {
             message: None,
             recipe_progress: None,
             ready_to_start: None,
+            outcome: None,
+            residue: Vec::new(),
         })
         .unwrap();
 
@@ -2912,6 +3630,8 @@ mod stream_credential_tests {
             message: None,
             recipe_progress: Some(p),
             ready_to_start: None,
+            outcome: None,
+            residue: Vec::new(),
         }
     }
 
@@ -3122,6 +3842,7 @@ mod redaction_tests {
             instances: vec![spec.clone(), spec.clone()],
             images: vec![],
             poll_interval_secs: None,
+            agent_settings: None,
         };
 
         let spec_shown = format!("{spec:?}");
@@ -3254,6 +3975,7 @@ mod redaction_tests {
             instances: vec![spec.clone()],
             images: vec![],
             poll_interval_secs: None,
+            agent_settings: None,
         };
         for printed in [
             format!("{spec:?}"),
