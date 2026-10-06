@@ -779,6 +779,47 @@ pub struct InstanceSpec {
     /// agent ignores it: the machine is built as before and serves plain HTTP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub certificate: Option<CertificatePull>,
+    /// **The devices allowed to stream from this machine, by certificate**
+    /// (v0.27.0; omnuv's docs/plans/pairing-by-certificate.md). A
+    /// destination, not a command: the agent hands the list to the machine,
+    /// whose own converger makes Sunshine's paired list hold exactly these
+    /// entries among the ones it wrote (`uuid` `onv-<device id>`), leaving a
+    /// buyer's own PIN pairings alone, and restarts Sunshine only while no
+    /// client streams. Public certificates only: each device's key stays on
+    /// the device. `None` from a Core that predates it and for a machine that
+    /// streams nothing, and an older agent ignores it; `Some` of an empty list
+    /// removes every entry the marketplace wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_devices: Option<Vec<StreamDevice>>,
+}
+
+/// One device allowed to stream from a machine (v0.27.0).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamDevice {
+    /// The device's marketplace id. Sunshine's entry is named by it, never
+    /// by the device's name.
+    pub id: String,
+    /// The device's own GameStream certificate, PEM. Public.
+    pub certificate: String,
+}
+
+/// What a machine's streaming host is, as the machine reports it (v0.27.0).
+///
+/// Read by the agent from a file the machine writes about itself, on the same
+/// channel as [`RecipeProgress`], so nothing runs inside the machine to ask.
+/// A client given these two values has paired: Sunshine's certificate is what
+/// it pins, and its unique id is how it names the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamIdentity {
+    /// Sunshine's `uniqueid`, which the converger writes when a Sunshine
+    /// never paired has none.
+    pub unique_id: String,
+    /// Sunshine's own certificate, PEM. Public.
+    pub certificate: String,
+    /// The marketplace devices its paired list holds now: the applied set,
+    /// observed, which Core compares with the one it sent.
+    #[serde(default)]
+    pub devices: Vec<String>,
 }
 
 // Exhaustive, like `TunnelFrame`'s: no `..`, so a new field does not compile
@@ -806,6 +847,7 @@ impl std::fmt::Debug for InstanceSpec {
             overlay,
             attempt,
             certificate,
+            stream_devices,
         } = self;
         f.debug_struct("InstanceSpec")
             .field("budget_secs", budget_secs)
@@ -831,6 +873,7 @@ impl std::fmt::Debug for InstanceSpec {
             .field("overlay", overlay)
             .field("attempt", attempt)
             .field("certificate", certificate)
+            .field("stream_devices", &stream_devices.as_ref().map(|d| d.iter().map(|x| x.id.as_str()).collect::<Vec<_>>()))
             .finish()
     }
 }
@@ -1055,6 +1098,11 @@ pub struct RecipeProgress {
     /// works.
     #[serde(default)]
     pub stream_credentials: Option<StreamCredentials>,
+    /// The machine's streaming identity and the devices it admits (v0.27.0),
+    /// once its converger has written them. Additive and defaulted, like
+    /// `stream_credentials`: absent means not reported, never empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_identity: Option<StreamIdentity>,
 }
 
 impl RecipeProgress {
@@ -2891,6 +2939,7 @@ mod stream_credential_tests {
         let running = RecipeProgress {
             status: "running".into(),
             step: Some("2/3".into()),
+            stream_identity: None,
             label: Some("Starting the application".into()),
             detail: None,
             stream_credentials: None,
@@ -2914,6 +2963,7 @@ mod stream_credential_tests {
         let sent = status_reporting(RecipeProgress {
             status: "done".into(),
             step: None,
+            stream_identity: None,
             label: None,
             detail: None,
             stream_credentials: Some(StreamCredentials {
@@ -2957,6 +3007,7 @@ mod stream_credential_tests {
             status_reporting(RecipeProgress {
                 status: "done".into(),
                 step: None,
+                stream_identity: None,
                 label: None,
                 detail: None,
                 stream_credentials: Some(creds.clone()),
@@ -3565,5 +3616,38 @@ mod secret_vocabulary_tests {
                  a crate that has moved on"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod stream_certificate_tests {
+    use super::*;
+
+    /// A spec without the field reads as `None`, and one with it round-trips;
+    /// an older agent's report reads as no identity, never an empty one.
+    #[test]
+    fn devices_and_identity_are_additive() {
+        let older: InstanceSpec = serde_json::from_value(serde_json::json!({
+            "id": "i", "lifecycle": "running", "name": "n", "vcpus": 1, "memory_mib": 1, "disk_gib": 1
+        }))
+        .unwrap();
+        assert!(older.stream_devices.is_none());
+        let written = serde_json::to_value(&older).unwrap();
+        assert!(written.get("stream_devices").is_none(), "an absent list writes no key");
+
+        let mut spec = older.clone();
+        spec.stream_devices = Some(vec![StreamDevice { id: "d1".into(), certificate: "-----BEGIN CERTIFICATE-----".into() }]);
+        let back: InstanceSpec = serde_json::from_value(serde_json::to_value(&spec).unwrap()).unwrap();
+        assert_eq!(back.stream_devices, spec.stream_devices);
+        assert!(!format!("{spec:?}").contains("BEGIN CERTIFICATE"), "Debug names devices, not their certificates");
+
+        let report: RecipeProgress = serde_json::from_value(serde_json::json!({"status": "done"})).unwrap();
+        assert!(report.stream_identity.is_none());
+        let reported: RecipeProgress = serde_json::from_value(serde_json::json!({
+            "status": "done",
+            "stream_identity": {"unique_id": "U", "certificate": "PEM", "devices": ["d1"]}
+        }))
+        .unwrap();
+        assert_eq!(reported.stream_identity.unwrap().devices, vec!["d1".to_string()]);
     }
 }
