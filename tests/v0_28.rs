@@ -412,43 +412,102 @@ fn a_refusal_body_reads_every_shape() {
 }
 
 /// **The sentinel parser, positive and negative.** Each word is read where it
-/// is meant and nowhere near it.
+/// is meant and nowhere near it, and a machine's words and a worker's are
+/// each read only as their own report's.
 #[test]
 fn the_words_are_read_exactly() {
     use now::StatusOutcome as O;
-    let read = now::StatusOutcome::from_words;
-    assert_eq!(read("deleted"), Some((O::Deleted, vec![])));
-    assert_eq!(
-        read("deleted; residue local-lvm:vm-123-disk-0 local-lvm:vm-123-cloudinit"),
-        Some((O::DeletedWithResidue, vec!["local-lvm:vm-123-disk-0".into(), "local-lvm:vm-123-cloudinit".into()]))
-    );
-    assert_eq!(read("not proven gone: vm 9101 was destroyed on n1").map(|o| o.0), Some(O::NotProvenGone));
-    assert_eq!(
-        read("this machine is no longer on its provider and was not rebuilt, since a rebuild would be a new machine").map(|o| o.0),
-        Some(O::Lost)
-    );
-    assert_eq!(
-        read("this worker is no longer on its provider and was not built again: its create ran past its horizon").map(|o| o.0),
-        Some(O::Lost)
-    );
-    assert_eq!(read("image ubuntu-26.04-nvidia is not offered by this provider").map(|o| o.0), Some(O::ImageNotOffered));
-
-    for near in [
-        "deleted ",
-        "Deleted",
-        "undeleted",
-        "vm 123 deleted",
-        "deleted; residues local-lvm:vm-1-disk-0",
-        "proven gone: vm 9101",
-        "it was not proven gone: vm 9101",
-        "this machine is fine",
-        "the machine is no longer on its provider",
-        "fixture: the image is not offered here",
-        "image ubuntu-26.04 is not offered by this provider yet",
-        "",
-    ] {
-        assert_eq!(read(near), None, "{near:?} was read as an outcome");
+    for read in [O::from_instance_words, O::from_worker_words] {
+        assert_eq!(read("deleted"), Some((O::Deleted, vec![])));
+        assert_eq!(
+            read("deleted; residue local-lvm:vm-123-disk-0 local-lvm:vm-123-cloudinit"),
+            Some((O::DeletedWithResidue, vec!["local-lvm:vm-123-disk-0".into(), "local-lvm:vm-123-cloudinit".into()]))
+        );
+        assert_eq!(read("not proven gone: vm 9101 was destroyed on n1").map(|o| o.0), Some(O::NotProvenGone));
+        assert_eq!(read("image ubuntu-26.04-nvidia is not offered by this provider").map(|o| o.0), Some(O::ImageNotOffered));
     }
+    let machine = "this machine is no longer on its provider and was not rebuilt, since a rebuild would be a new machine";
+    let worker = "this worker is no longer on its provider and was not built again: its create ran past its horizon";
+    assert_eq!(O::from_instance_words(machine).map(|o| o.0), Some(O::Lost));
+    assert_eq!(O::from_worker_words(worker).map(|o| o.0), Some(O::Lost));
+    // The cross cases: Core's only_a_lost_worker_report_is_one.
+    assert_eq!(O::from_instance_words(worker), None, "a worker's words read as a machine lost");
+    assert_eq!(O::from_worker_words(machine), None, "a machine's words read as a worker lost");
+
+    for read in [O::from_instance_words, O::from_worker_words] {
+        for near in [
+            "deleted ",
+            "Deleted",
+            "undeleted",
+            "vm 123 deleted",
+            "deleted; residues local-lvm:vm-1-disk-0",
+            "proven gone: vm 9101",
+            "it was not proven gone: vm 9101",
+            "this machine is fine",
+            "the machine is no longer on its provider",
+            "fixture: the image is not offered here",
+            "image ubuntu-26.04 is not offered by this provider yet",
+            "",
+        ] {
+            assert_eq!(read(near), None, "{near:?} was read as an outcome");
+        }
+    }
+}
+
+/// **The residue is read as strictly as Core reads it**: Core's own cases
+/// from `claims.rs` `the_residue_word_is_read_strictly`, verbatim, the
+/// negatives being words the v0.28 draft took as a deletion proof. And the
+/// typed residue is held to the same grammar.
+#[test]
+fn the_residue_word_is_read_strictly() {
+    use now::StatusOutcome as O;
+    for read in [O::from_instance_words, O::from_worker_words] {
+        assert_eq!(
+            read("deleted; residue local-lvm:vm-9101-cloudinit local-lvm:vm-9101-disk-0"),
+            Some((O::DeletedWithResidue, vec!["local-lvm:vm-9101-cloudinit".into(), "local-lvm:vm-9101-disk-0".into()]))
+        );
+        assert_eq!(read("deleted; residue local:9101/vm-9101-disk-0.qcow2").map(|o| o.1.len()), Some(1));
+        let most = format!("deleted; residue {}", vec!["s:v"; 64].join(" "));
+        assert_eq!(read(&most).map(|o| o.1.len()), Some(64), "64 volumes is the limit, not past it");
+        let many = format!("deleted; residue {}", vec!["s:v"; 65].join(" "));
+        for word in [
+            "deleted; residue ",
+            "deleted; residue nocolon",
+            "deleted; residue :name",
+            "deleted; residue store:",
+            "deleted; residue a:b; rm -rf /",
+            "deleted; residue a:b  c:d",
+            "deleted;residue a:b",
+            "deleted; residue a:b ",
+            "deleted ",
+            "Deleted",
+            many.as_str(),
+        ] {
+            assert_eq!(read(word), None, "{word:?} was taken as a proof");
+        }
+    }
+
+    for good in ["local-lvm:vm-9101-disk-0", "local:9101/vm-9101-disk-0.qcow2", "a.b_c-1:x"] {
+        assert!(now::residue_volume_id(good), "{good}");
+    }
+    let long_storage = format!("{}:v", "s".repeat(65));
+    let long_name = format!("s:{}", "v".repeat(256));
+    for bad in ["", "nocolon", ":name", "store:", "a:b;", "a:b:c", "st ore:v", "s:v w", "s/x:v", long_storage.as_str(), long_name.as_str(), "s:v\u{e9}"] {
+        assert!(!now::residue_volume_id(bad), "{bad:?} read as a volume id");
+    }
+    assert!(now::residue_volume_id(&format!("{}:{}", "s".repeat(64), "v".repeat(255))), "the limits themselves");
+
+    let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert!(O::residue_valid(&ids(&["local-lvm:vm-1-disk-0"])));
+    assert!(!O::residue_valid(&[]), "a residue of nothing");
+    assert!(!O::residue_valid(&ids(&["a:b;", "rm"])));
+    assert!(!O::residue_valid(&vec!["s:v".to_string(); 65]));
+    // The typed field reaches the reader as sent; residue_valid is the check.
+    let report: now::InstanceStatus = serde_json::from_value(serde_json::json!({
+        "id": "i", "state": "STOPPED", "outcome": "deleted_with_residue", "residue": ["nocolon"]
+    }))
+    .expect("a typed report");
+    assert!(!O::residue_valid(&report.residue), "a malformed typed residue passed");
 }
 
 /// **A newer peer's variant is one row not understood, never a whole message
@@ -483,6 +542,29 @@ fn a_newer_variant_is_one_row_not_the_whole_message() {
     let said: now::ScrubSaid =
         serde_json::from_str(r#"{"id":"s","attempt":1,"outcome":"partial","detail":{}}"#).expect("a newer scrub outcome");
     assert_eq!(said.outcome, now::ScrubOutcome::Unknown);
+
+    // A family a newer Core adds is "not said" for that one image, never the
+    // whole view refused: the agent falls back to its own list for it.
+    let mut view = value(&golden("v0.28", "desired-state.json"));
+    let images = view["images"].as_array_mut().expect("the v0.28 view carries images");
+    let mut newer = images[0].clone();
+    newer["id"] = "macos-15".into();
+    newer["os_family"] = "macos".into();
+    images.push(newer);
+    let read: now::DesiredState = serde_json::from_value(view).expect("a view with a newer family");
+    let families: Vec<_> = read.images.iter().map(|i| i.os_family).collect();
+    assert_eq!(families.last(), Some(&None), "an unknown family read as a family");
+    assert!(families[..families.len() - 1].iter().all(Option::is_some), "a known family lost: {families:?}");
+    for (word, want) in [("linux", Some(now::OsFamily::Linux)), ("windows", Some(now::OsFamily::Windows)), ("Windows", None)] {
+        let a: now::ImageArtefact = serde_json::from_value(serde_json::json!({
+            "id": "a", "sha256": "x", "bytes": 1, "url": "https://core/a", "os_family": word
+        }))
+        .unwrap();
+        assert_eq!(a.os_family, want, "{word}");
+    }
+    let a: now::ImageArtefact =
+        serde_json::from_value(serde_json::json!({"id": "a", "sha256": "x", "bytes": 1, "url": "https://core/a", "os_family": null})).unwrap();
+    assert_eq!(a.os_family, None);
 }
 
 /// **The session is redacted in `Debug`, and travels in full.**

@@ -765,8 +765,20 @@ pub struct ImageArtefact {
     /// so a provider knows which images are Windows from the catalogue itself
     /// rather than from a list kept by hand in its own file. `None` from a
     /// Core that predates it; the agent then falls back to its own list.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// A family this build does not know (a newer Core's) reads as `None`,
+    /// "not said", never as a refusal of the whole view: a v0.28 agent falls
+    /// back to its own list for that one image. Done in the field's reader,
+    /// not as an `Unknown` variant, so [`RecipeImage::os_family`] keeps
+    /// meaning a family the catalogue actually has.
+    #[serde(default, deserialize_with = "os_family_or_unsaid", skip_serializing_if = "Option::is_none")]
     pub os_family: Option<OsFamily>,
+}
+
+/// An artefact's family, or `None` for one this build does not know.
+fn os_family_or_unsaid<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<OsFamily>, D::Error> {
+    let word: Option<String> = Option::deserialize(d)?;
+    Ok(word.and_then(|w| OsFamily::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(&w)).ok()))
 }
 
 /// An image a provider is actually holding, and the digest of what it holds.
@@ -1357,7 +1369,7 @@ pub struct InstanceStatus {
     /// **What the report concludes, typed** (v0.28.0, contract change 3):
     /// see [`StatusOutcome`]. `None` from an agent that predates it, and from
     /// any report that concludes nothing; Core then reads `message` as it
-    /// always has ([`StatusOutcome::from_words`]).
+    /// always has ([`StatusOutcome::from_instance_words`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<StatusOutcome>,
     /// The volumes a destroy left behind, by the runtime's own ids, with
@@ -2391,7 +2403,8 @@ pub fn answer_means(route: &str, status: u16, code: Option<RefusalCode>) -> Answ
 /// contract change 3).
 ///
 /// Before it these travelled as words in `message`, and Core parsed their
-/// prefixes; [`StatusOutcome::from_words`] is that parser, kept for one
+/// prefixes; [`StatusOutcome::from_instance_words`] and
+/// [`StatusOutcome::from_worker_words`] are that parser, kept for one
 /// release window so a Core can read an agent that predates the field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2401,7 +2414,8 @@ pub enum StatusOutcome {
     Lost,
     /// Proven gone: one complete listing after the destroy found nothing.
     Deleted,
-    /// Gone, and volumes stayed behind; they are named in `residue`.
+    /// Gone, and volumes stayed behind; they are named in `residue`, which
+    /// must pass [`StatusOutcome::residue_valid`] for this to prove anything.
     DeletedWithResidue,
     /// Destroyed, and not yet proven gone.
     NotProvenGone,
@@ -2429,24 +2443,76 @@ pub const WORDS_WORKER_LOST: &str = "this worker is no longer on its provider";
 /// this provider`.
 pub const WORDS_IMAGE_NOT_OFFERED: &str = " is not offered by this provider";
 
+/// **One volume id as the residue grammar reads it**: `storage:name`, a
+/// storage id of 1 to 64 letters, digits, `-`, `_` and `.`, and a name of 1
+/// to 255 printable ASCII characters without `;` or `:`. Core's grammar
+/// (`claims.rs`, `volume_id`), moved here so the agent, Core and the typed
+/// field are held to the same one.
+pub fn residue_volume_id(v: &str) -> bool {
+    v.split_once(':').is_some_and(|(storage, name)| {
+        (1..=64).contains(&storage.len())
+            && storage.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+            && (1..=255).contains(&name.len())
+            && name.bytes().all(|b| b.is_ascii_graphic() && b != b';' && b != b':')
+    })
+}
+
+/// Which report's words are being read: a machine's and a worker's lost
+/// words differ, and each is lost only in its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordsOf {
+    Instance,
+    Worker,
+}
+
 impl StatusOutcome {
-    /// **The outcome a report's words carry, and its residue**, for an agent
-    /// that predates the typed field: the one parser of the sentinels, so
-    /// every reader parses them alike. `None` for words that conclude
-    /// nothing. The words alone: Core's own conditions on a lost report (an
-    /// ERROR, no runtime id, not retryable, waiting on nothing) still apply.
-    pub fn from_words(message: &str) -> Option<(StatusOutcome, Vec<String>)> {
+    /// **The most volumes one residue names.** Core refuses more.
+    pub const RESIDUE_MAX: usize = 64;
+
+    /// **Whether `residue` may stand beside [`StatusOutcome::DeletedWithResidue`]**:
+    /// 1 to [`StatusOutcome::RESIDUE_MAX`] ids, each a
+    /// [`residue_volume_id`]. A typed report whose residue fails this is no
+    /// proof of anything, exactly as its words would not be; the reader
+    /// checks it, since serde cannot.
+    pub fn residue_valid(residue: &[String]) -> bool {
+        (1..=Self::RESIDUE_MAX).contains(&residue.len()) && residue.iter().all(|v| residue_volume_id(v))
+    }
+
+    /// **The outcome a machine's report words carry, and its residue**, for
+    /// an agent that predates the typed field: the one parser of the
+    /// sentinels for [`InstanceStatus::message`]. `None` for words that
+    /// conclude nothing, including a worker's lost words and any residue
+    /// outside the strict grammar. The words alone: Core's own conditions on
+    /// a lost report (an ERROR, no runtime id, not retryable, waiting on
+    /// nothing) still apply.
+    pub fn from_instance_words(message: &str) -> Option<(StatusOutcome, Vec<String>)> {
+        Self::from_words_of(WordsOf::Instance, message)
+    }
+
+    /// **The same for [`WorkerStatus::message`]**: a worker is lost only in
+    /// the worker's words, never in a machine's.
+    pub fn from_worker_words(message: &str) -> Option<(StatusOutcome, Vec<String>)> {
+        Self::from_words_of(WordsOf::Worker, message)
+    }
+
+    fn from_words_of(of: WordsOf, message: &str) -> Option<(StatusOutcome, Vec<String>)> {
         if message == WORDS_DELETED {
             return Some((StatusOutcome::Deleted, Vec::new()));
         }
         if let Some(volumes) = message.strip_prefix(WORDS_DELETED_WITH_RESIDUE) {
-            let residue = volumes.split_whitespace().map(str::to_string).collect();
-            return Some((StatusOutcome::DeletedWithResidue, residue));
+            // Single spaces only: `split(' ')` gives an empty id for a double
+            // space, and an empty id fails the grammar.
+            let residue: Vec<String> = volumes.split(' ').map(str::to_string).collect();
+            return Self::residue_valid(&residue).then_some((StatusOutcome::DeletedWithResidue, residue));
         }
         if message.starts_with(WORDS_NOT_PROVEN_GONE) {
             return Some((StatusOutcome::NotProvenGone, Vec::new()));
         }
-        if message.starts_with(WORDS_MACHINE_LOST) || message.starts_with(WORDS_WORKER_LOST) {
+        let lost = match of {
+            WordsOf::Instance => WORDS_MACHINE_LOST,
+            WordsOf::Worker => WORDS_WORKER_LOST,
+        };
+        if message.starts_with(lost) {
             return Some((StatusOutcome::Lost, Vec::new()));
         }
         if message.starts_with("image ") && message.ends_with(WORDS_IMAGE_NOT_OFFERED) {
