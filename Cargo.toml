@@ -1,6 +1,6 @@
 [package]
 name = "omnuv-protocol"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/rsafehelm/omnuv-protocol"
@@ -8,8 +8,10 @@ description = "Public wire contract between Omnuv Core and Omnuv Provider agents
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 serde_json = "1"
+v027 = { package = "omnuv-protocol", git = "https://github.com/rsafehelm/omnuv-protocol", tag = "v0.27.0" }
 
 [workspace]

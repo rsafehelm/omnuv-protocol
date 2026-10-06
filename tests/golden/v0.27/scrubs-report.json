@@ -1,0 +1,13 @@
+{
+  "scrubs": [
+    {
+      "id": "6f1c2f2e-58a4-4b43-9b0a-0d7b6c3c1d11",
+      "attempt": 2,
+      "outcome": "failed",
+      "detail": {
+        "detail": "the guest never reported",
+        "seconds": 1200.0
+      }
+    }
+  ]
+}

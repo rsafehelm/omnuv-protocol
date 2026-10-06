@@ -1,0 +1,45 @@
+{
+  "protocol_version": 6,
+  "audit": [],
+  "workers": [
+    {
+      "retryable": false,
+      "waiting_on": null,
+      "id": "77777777-7777-7777-7777-777777777777",
+      "state": "ERROR",
+      "local_id": null,
+      "endpoint": null,
+      "adapters": [],
+      "diagnostics": null,
+      "message": "this worker is no longer on its provider and was not built again: its create ran past its horizon",
+      "telemetry": null
+    }
+  ],
+  "instances": [
+    {
+      "retryable": null,
+      "waiting_on": null,
+      "id": "55555555-5555-5555-5555-555555555555",
+      "state": "STOPPED",
+      "rebooted_token": null,
+      "local_id": null,
+      "node": null,
+      "console_password_generation": null,
+      "private_ip": null,
+      "adapters": [],
+      "diagnostics": null,
+      "message": "deleted; residue local-lvm:vm-9101-disk-0 local-lvm:vm-9101-cloudinit",
+      "recipe_progress": null
+    }
+  ],
+  "checks": [
+    {
+      "name": "runtime.api",
+      "kind": "connectivity",
+      "result": "pass",
+      "detail": "proxmox api reachable (pve 9.2.20)",
+      "subject": null
+    }
+  ],
+  "observation": null
+}
