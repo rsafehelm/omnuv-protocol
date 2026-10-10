@@ -22,7 +22,9 @@ omnuv-protocol = { git = "https://github.com/rsafehelm/omnuv-protocol", tag = "v
 ```
 
 The **tag** is the release a consumer pins (`v0.29.0` today); the crate's own
-`version` in Cargo.toml moves separately and more slowly. It is `0.5.0` at
+`version` in Cargo.toml moves separately and more slowly. It is `0.6.0` at
+`v0.29.0`, because `InventoryReport`, which a consumer builds by literal,
+gained `held_model_sets`; `0.5.0` at
 `v0.28.0`, because structs a consumer builds by literal gained fields
 (`DesiredState`, `Heartbeat`, `ImageArtefact`, `HeldImage`,
 `InferenceWorkerSpec`, `InstanceStatus`, `WorkerStatus`) and `Lifecycle` and
