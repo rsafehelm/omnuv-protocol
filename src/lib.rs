@@ -490,6 +490,15 @@ pub struct InventoryReport {
     /// provider holds nothing.
     #[serde(default)]
     pub held_images: Vec<HeldImage>,
+    /// The model sets this provider holds, each as one read-only image a
+    /// machine is given (omnuv's multi-node LLM plan, M2, 10 October 2026).
+    ///
+    /// Observed from the image and its record at the provider, never from
+    /// having built it. Additive: an agent that does not send it holds none
+    /// as far as Core can tell, and Core places no machine that asks for a
+    /// set there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_model_sets: Vec<HeldModelSet>,
 }
 
 impl InventoryReport {
@@ -818,6 +827,31 @@ pub struct DnsRecord {
 
 /// A buyer's virtual machine, normalized. The driver translates this into
 /// runtime-native resources; nothing here names Proxmox, KubeVirt or OpenStack.
+/// A model set as a provider holds it: the models a recipe serves, fetched
+/// and verified at the provider and built into one read-only image there.
+///
+/// `set_sha256` is the identity: the digest of the manifest that pins every
+/// file of the set, the same wherever the set is held. `image_sha256` is the
+/// image this provider built from it, which differs between providers and
+/// is reported so a change of the file under a machine is seen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldModelSet {
+    pub version: String,
+    pub set_sha256: String,
+    pub image_sha256: String,
+    /// The node that holds it, where a provider has several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+}
+
+/// The model set a machine is to be given, read-only, as a destination:
+/// the agent attaches the image it holds of exactly this set, or refuses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSetRef {
+    pub version: String,
+    pub set_sha256: String,
+}
+
 // `Debug` is written out below rather than derived: the console password's
 // hash is attackable offline, and a derived `Debug` printed it through every
 // `{:?}` on a spec or a desired state.
@@ -897,6 +931,14 @@ pub struct InstanceSpec {
     /// an agent that receives `Some` places there or refuses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_node: Option<String>,
+    /// The model set this machine reads its models from, given to it
+    /// read-only by the hypervisor. `None` for every machine but a recipe's
+    /// that serves cached models, and from a Core that predates it. An
+    /// agent that receives `Some` attaches the image it holds of that set,
+    /// held to `set_sha256`, or reports the create refused: it never builds
+    /// the machine without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_set: Option<ModelSetRef>,
     /// Set when a reboot has been requested and not yet performed. Carries the
     /// request's identity so the agent can report which one it satisfied and
     /// the same reboot is never applied twice.
@@ -1007,6 +1049,7 @@ impl std::fmt::Debug for InstanceSpec {
             built,
             gpu_local_ids,
             gpu_node,
+            model_set,
             reboot_token,
             network,
             recipe,
@@ -1033,6 +1076,7 @@ impl std::fmt::Debug for InstanceSpec {
             .field("built", built)
             .field("gpu_local_ids", gpu_local_ids)
             .field("gpu_node", gpu_node)
+            .field("model_set", model_set)
             .field("reboot_token", reboot_token)
             .field("network", network)
             .field("recipe", recipe)
@@ -2693,6 +2737,12 @@ mod tests {
                 sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
                 node: None,
             }],
+            held_model_sets: vec![HeldModelSet {
+                version: "2026-10-a".into(),
+                set_sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".into(),
+                image_sha256: "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752".into(),
+                node: None,
+            }],
             nodes: vec![NodeInventory {
                 local_id: "pve".into(),
                 cpu_cores: 16,
@@ -2761,6 +2811,33 @@ mod tests {
 
     /// The catalogue is additive in both directions, which is why
     /// `PROTOCOL_VERSION` does not move for it.
+    /// **A model set is additive both ways** (v0.29.0). An agent that
+    /// predates it sends no `held_model_sets`, which is "holds none"; a Core
+    /// that predates it sends no `model_set`, which is "give it none"; and
+    /// neither field is on the wire when it has nothing to say, so an older
+    /// reader that refuses unknown fields is sent nothing new.
+    #[test]
+    fn a_model_set_is_absent_from_the_wire_until_there_is_one() {
+        let spec = InstanceSpec { id: "i".into(), name: "n".into(), ..Default::default() };
+        let said = serde_json::to_value(&spec).unwrap();
+        assert!(said.get("model_set").is_none(), "{said}");
+        let back: InstanceSpec = serde_json::from_value(said).unwrap();
+        assert_eq!(back.model_set, None);
+
+        let with = InstanceSpec {
+            model_set: Some(ModelSetRef { version: "2026-10-a".into(), set_sha256: "ab".repeat(32) }),
+            ..spec
+        };
+        let said = serde_json::to_value(&with).unwrap();
+        assert_eq!(said["model_set"]["version"], "2026-10-a");
+        assert_eq!(serde_json::from_value::<InstanceSpec>(said).unwrap().model_set, with.model_set);
+
+        let held = HeldModelSet { version: "2026-10-a".into(), set_sha256: "ab".repeat(32), image_sha256: "cd".repeat(32), node: None };
+        let said = serde_json::to_value(&held).unwrap();
+        assert!(said.get("node").is_none(), "{said}");
+        assert_eq!(serde_json::from_value::<HeldModelSet>(said).unwrap(), held);
+    }
+
     #[test]
     fn the_catalogue_is_invisible_to_a_peer_that_predates_it() {
         // An agent built before the catalogue deserializes a DesiredState
@@ -2812,8 +2889,11 @@ mod tests {
         // real one gains a required field.
         let mut v = serde_json::to_value(sample()).unwrap();
         v.as_object_mut().unwrap().remove("held_images");
+        // And one that predates model sets (v0.29.0) says nothing of them.
+        v.as_object_mut().unwrap().remove("held_model_sets");
         let report: InventoryReport = serde_json::from_value(v).unwrap();
         assert!(report.held_images.is_empty());
+        assert!(report.held_model_sets.is_empty(), "an agent that says nothing of model sets holds none");
         assert_eq!(report.images, vec!["ubuntu-26.04".to_string()]);
     }
 
