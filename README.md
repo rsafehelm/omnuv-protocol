@@ -18,11 +18,14 @@ recover state after a restart, and never parses or branches on their contents.
 
 ```toml
 [dependencies]
-omnuv-protocol = { git = "https://github.com/rsafehelm/omnuv-protocol", tag = "v0.29.0" }
+omnuv-protocol = { git = "https://github.com/rsafehelm/omnuv-protocol", tag = "v0.30.0" }
 ```
 
-The **tag** is the release a consumer pins (`v0.29.0` today); the crate's own
-`version` in Cargo.toml moves separately and more slowly. It is `0.6.0` at
+The **tag** is the release a consumer pins (`v0.30.0` today); the crate's own
+`version` in Cargo.toml moves separately and more slowly. It is `0.7.0` at
+`v0.30.0`, because `RecipeSpec`, which a consumer builds by literal, gained
+`sealed_file` (a file of secrets for a recipe's steps, written at first boot
+and never printed; the capability `secret-file`); `0.6.0` at
 `v0.29.0`, because `InventoryReport`, which a consumer builds by literal,
 gained `held_model_sets`; `0.5.0` at
 `v0.28.0`, because structs a consumer builds by literal gained fields

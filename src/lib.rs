@@ -1154,6 +1154,29 @@ pub struct RecipeSpec {
     /// Shell, run in the compose directory once the containers are up.
     #[serde(default)]
     pub post_up: Vec<String>,
+    /// **What the recipe's steps need and nobody else may read** (v0.30.0):
+    /// a file the first boot writes, root's alone, before any step runs.
+    /// Sent only to an agent that advertised [`CAPABILITY_SECRET_FILE`].
+    ///
+    /// Until then a secret a step needed was in the step's own text: one
+    /// model served by several machines shares a secret, and Core wrote it
+    /// with the `printf` that makes `/etc/onv/llm.env`. A step is a `String`,
+    /// printed whole by a `{:?}` of [`DesiredState`] and by any line that
+    /// logs what it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed_file: Option<SecretFile>,
+}
+
+/// A file of secrets for a recipe's steps (v0.30.0): written at first boot,
+/// owned by root, mode 0600, before the first step. The steps read it; the
+/// agent and Core never print it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretFile {
+    /// Where it is written on the machine, absolute.
+    pub path: String,
+    /// Its whole content. [`Redacted`]: it is reached from `DesiredState`,
+    /// which is printed whole by a `{:?}`.
+    pub secret: Redacted,
 }
 
 /// What the agent needs to know about an image to build a machine from it.
@@ -2226,6 +2249,11 @@ pub const CAPABILITY_CARD_SCRUB: &str = "card-scrub";
 /// completed.
 pub const CAPABILITY_REPORT_INTERVAL: &str = "report-interval";
 
+/// The agent writes a recipe's [`SecretFile`] at first boot (v0.30.0). Core
+/// sends one only to an agent that says so; to any other the secret travels
+/// as it did, in a step.
+pub const CAPABILITY_SECRET_FILE: &str = "secret-file";
+
 /// **Every capability this contract names.** Core relies on one only where an
 /// agent advertised it, and the floor of what a provider's agents advertised
 /// only rises: a rollback across an addition is answered 426.
@@ -2238,6 +2266,7 @@ pub const CAPABILITIES: &[&str] = &[
     CAPABILITY_GROUP_PREPARE,
     CAPABILITY_CARD_SCRUB,
     CAPABILITY_REPORT_INTERVAL,
+    CAPABILITY_SECRET_FILE,
 ];
 
 /// What an agent says at its handshake, `POST /provider/v1/handshake`.

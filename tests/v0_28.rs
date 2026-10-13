@@ -289,11 +289,16 @@ fn the_names_are_the_ones_on_the_wire() {
         "the route Core declares and the path the agent fetches disagree"
     );
     let caps: Vec<&str> = names["capabilities"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
-    assert_eq!(now::CAPABILITIES, caps.as_slice());
-    // The agent advertises the same eight, in its own order.
+    // v0.28's names are today's first eight, in its order, and what was
+    // named since is named here: a capability is added at the end and never
+    // renamed or removed (the floor only rises).
+    const SINCE_V0_28: &[&str] = &[now::CAPABILITY_SECRET_FILE];
+    assert_eq!(&now::CAPABILITIES[..caps.len()], caps.as_slice());
+    assert_eq!(&now::CAPABILITIES[caps.len()..], SINCE_V0_28);
+    // The agent of v0.27 advertises those eight, in its own order.
     let advertised = value(&golden("v0.27", "handshake.json"));
     let mut agent: Vec<&str> = advertised["capabilities"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
-    let mut known = now::CAPABILITIES.to_vec();
+    let mut known = now::CAPABILITIES[..caps.len()].to_vec();
     agent.sort();
     known.sort();
     assert_eq!(agent, known, "the agent's capabilities and the contract's differ");
